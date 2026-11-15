@@ -1,6 +1,8 @@
 .zig-cache/
 zig-out/
 third-party/
+models/
+voices/
 *.o
 *.a
 *.so
