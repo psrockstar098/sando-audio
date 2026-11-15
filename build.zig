@@ -73,6 +73,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.addOptions("build_options", options);
+    // The C API tests use the C allocator, so the test binary links libc
+    // unconditionally — otherwise `zig build test` fails on a fresh checkout
+    // without the vendored audio.cpp prebuilt (linkAudiocpp is the only
+    // other place that sets link_libc, and it no-ops when the dir is absent).
+    test_mod.link_libc = true;
     linkAudiocpp(b, test_mod, audiocpp_dir);
 
     const lib_tests = b.addTest(.{ .root_module = test_mod });
