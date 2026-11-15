@@ -8,6 +8,9 @@ pub const hardware = @import("hardware.zig");
 pub const memory = @import("memory.zig");
 pub const config = @import("config.zig");
 pub const audiocpp = @import("audiocpp.zig");
+pub const runtime = @import("runtime.zig");
+pub const models = @import("models.zig");
+pub const plugin = @import("plugin.zig");
 
 pub const version = "0.1.0";
 pub const version_string = "sando-audio 0.1.0 (Phase 1: Core Engine & Universal Runtime)";
@@ -19,4 +22,7 @@ test {
     _ = @import("memory.zig");
     _ = @import("config.zig");
     _ = @import("audiocpp.zig");
+    _ = @import("runtime.zig");
+    _ = @import("models.zig");
+    _ = @import("plugin.zig");
 }
