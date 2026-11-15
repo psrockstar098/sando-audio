@@ -1,4 +1,77 @@
-# SANDO Audio — Phase 1 STATUS
+# SANDO Audio — Phase 2 STATUS
+
+Phase 2 (Real-Time Speech & Voice Intelligence): **COMPLETE and verified
+by D from a clean worktree**, 2026-11-15. Built and tested on this VM
+(Intel Xeon Platinum 8321HC, 4 cores, AVX-512, Ubuntu 24.04, glibc 2.39,
+Zig 0.17.1). Local commits only until pushed — origin/main is still the
+Phase 1 head until D pushes.
+
+## Phase 2 verification summary (D, independent, fresh worktree)
+
+| Check | Result |
+|---|---|
+| `zig build -j1 -Dcpu=baseline` (clean cache, fresh worktree) | clean, exit 0 |
+| `zig build test -j1 -Dcpu=baseline`, test binary run directly | **68/68 tests pass** (was 42/42), exit 0 |
+| CLI smoke (`version`, `doctor`, `config validate`, `bench`) | 0.2.0 Phase 2; doctor correct (Vulkan unavailable — no DRI node, the Phase 2 fix); bench memory ~584 ns/iter, inference honestly skipped |
+| Live ASR (Moonshine-Streaming-small, 287 MB, CPU) | **PROVEN with real speech**: "Hello, this is Sando speaking." → "Hello, this is sandos speaking." (~4 s on this VM) |
+| `stream` / `vad` / `voices` commands | behave honestly: stream on a tone gives empty final, 0 segments; vad finds the tone segment via energy fallback (no silero model on disk); `voices list` reports no profiles |
+| TTS (Qwen3-TTS-0.6B-Q8_0, 1.9 GB) | **NOT runnable on this VM**: `run --task tts` fails with `error: Runtime` (2 GB model vs ~1.4 GB free RAM; no voice profile enrolled either — `voices/` is empty) |
+| C API inference entry points | present: `sando_engine_infer_text`, `sando_engine_infer_tts`, `sando_stream_create/push/finish` (17 exports total) |
+| Weights in git | none — `models/` (2.3 GB) and `voices/` are gitignored; tree clean |
+| audio.cpp version shipped | **0.9.3 prebuilt, NOT 0.9.5** — see below |
+
+## audio.cpp latest — NOT landed in Phase 2
+
+Dominic ordered audio.cpp latest (0.9.5) during Phase 2. What happened:
+the source was cloned to `~/workspace/tmp/audio.cpp-src`, but **no source
+build was ever configured** (no `build/` dir, no CMakeCache) and the
+vendored libs in `third-party/audiocpp` are still the 0.9.3 prebuilt
+(timestamps 03:11, Phase 1). The bindings were extended for the new
+surface but the linked library did not change — `doctor` still reports
+build 0.9.3. The 0.9.5 prebuilt cannot load here (needs glibc 2.43, VM
+has 2.39); a minimal source build was never attempted. This is an open
+follow-up, not a Phase 2 claim.
+
+## Phase 2 modules (what landed)
+
+- LiveStream Engine + VAD (`src/streaming.zig`, `src/vad.zig`): streaming
+  ASR over WAV, partial transcripts, VAD activity, barge-in counting.
+- AudioSense (`src/audiosense.zig`): capability-first interface.
+- VoiceDNA (`src/voicedna.zig`): voice profiles with a hard consent
+  rule — no real person's voice is used in tests; only synthetic
+  enrollment exists (`voices enroll-synthetic`).
+- SmartCache (`src/cache.zig`): voice/language/context-aware TTS + ASR
+  cache (64 MiB, in-process).
+- ReflexEngine (`src/reflex.zig`): speculative scheduling, turn-end
+  probability, fastest-viable model choice.
+- Lazy per-task loading + plugin manifests (`src/runtime.zig`,
+  `src/plugin.zig`): a missing TTS file no longer blocks an ASR run.
+- C API inference entry points (`src/c_api.zig`).
+- CLI: `stream`, `vad`, `voices list/enroll-synthetic/delete`,
+  `run --cache`, `plugins load --manifest`.
+- Hardware fix: Vulkan "available" now requires a DRI render node, not
+  just the loader — this VM ships libvulkan.so.1 with no GPU, and auto
+  selection used to hand audio.cpp a dead Vulkan backend (found by the
+  Moonshine ASR smoke test; new test asserts the invariant).
+
+## Phase 2 honest gaps
+
+1. **TTS not verified live** (see above) — needs a machine with room
+   for the 2 GB model (Dominic's laptop) and a real enrolled voice.
+2. **Whisper-small substitution**: the brief's Whisper-small-Q8_0 does
+   not exist as a standalone GGUF in the audio.cpp hub, so
+   Moonshine-Streaming-small substitutes for ASR. Documented in the
+   example config and README.
+3. **No live mic/speaker** (unchanged from Phase 1) — WAV + null
+   device only.
+4. **No silero-vad weights on disk** — VAD works via the honest energy
+   fallback; the ONNX file was not fetched.
+5. **No WASM build** (unchanged).
+6. **audio.cpp 0.9.5 not landed** (see above).
+
+---
+
+# SANDO Audio — Phase 1 STATUS (kept below for the record)
 
 Phase 1 (Core Engine & Universal Runtime): **COMPLETE and verified**,
 2026-11-15. Built and tested on this VM (Intel Xeon Platinum 8321HC,

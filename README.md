@@ -17,7 +17,7 @@ for the per-item checklist with exact verification results.
 
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
 - audio.cpp 0.9.3 prebuilt (ABI 0.2.0), 17 tasks, 133 model families
-  (0.9.5 source build in progress — see STATUS.md)
+  (0.9.5 was ordered but did not land in Phase 2 — see STATUS.md)
 - 68 unit tests, all passing, no leaks
 - Live ASR verified with Moonshine-Streaming-small (287 MB): `run` and
   `stream` over a WAV file complete end to end on the CPU backend
