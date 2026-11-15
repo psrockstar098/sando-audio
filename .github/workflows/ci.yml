@@ -1,0 +1,183 @@
+# SANDO Audio — CI
+#
+# Proves, on a fresh GitHub runner, that SANDO Audio builds, its full
+# test suite passes, and TTS actually produces speech. TTS could never
+# run on the dev VM (only ~1.4 GB RAM free there), so this run is the
+# first real TTS proof.
+#
+# Runner: ubuntu-24.04, public repo = 4 vCPU, 16 GB RAM, 14 GB SSD.
+# Disk is the tight constraint: the audio.cpp source tree is deleted
+# right after its libs are vendored, before the 2.3 GB of models land.
+#
+# What this tests: JUST THE ENGINE, with the stock Qwen3-TTS base
+# model the config points at. The real voice is the fine-tuned
+# Qwen3-TTS-0.6B LoRA, which is not finished yet. Swapping it in
+# later is a model-artifact/config change (the [[models]] entry in
+# config/sando.example.toml + the download URL/size below), NOT a
+# workflow change. There is no LoRA-loading mechanism in the repo
+# to reference — the swap point is the config entry's `file`.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-tts:
+    runs-on: ubuntu-24.04
+    # audio.cpp takes ~30-60 min to build from source even at -j4
+    # (it took ~80 min at -j1 on the dev VM).
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk at start
+        run: df -h
+
+      - name: Check toolchain
+        run: |
+          cmake --version
+          g++ --version
+          make --version
+
+      - name: Install Zig 0.17.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
+      # config/sando.toml is gitignored, so a fresh checkout has no
+      # config at all. The CLI's default config path is
+      # config/sando.toml (src/engine.zig: default_config_path), and
+      # `run` cannot start without it. The example config is what
+      # the TTS smoke test runs against: its qwen3-tts-0.6b entry
+      # points at models/qwen3-tts-12hz-0.6b-base-q8_0.gguf.
+      - name: Config from example
+        run: cp config/sando.example.toml config/sando.toml
+
+      # audio.cpp v0.9.5 from source: the 0.9.5 prebuilt needs
+      # glibc 2.43 and the runner has 2.39, same as the dev VM.
+      # Flags are the exact values from the VM's successful 0.9.5
+      # build (build/CMakeCache.txt): Release, -g0, C API on,
+      # all GPU backends off, all CPU variants on, version stamped
+      # 0.9.5 (the default stamp is the useless "dev").
+      # Target `audiocpp`, -j4 (4 cores on the runner).
+      - name: Build audio.cpp 0.9.5 from source
+        run: |
+          git clone https://github.com/0xShug0/audio.cpp
+          cd audio.cpp
+          git fetch origin tag v0.9.5
+          git checkout v0.9.5
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS=-g0 \
+            -DAUDIOCPP_BUILD_C_API=ON \
+            -DAUDIOCPP_VERSION=0.9.5 \
+            -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_HIP=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_WEBGPU=OFF \
+            -DENGINE_ENABLE_SYCL=OFF \
+            -DENGINE_ENABLE_METAL=OFF \
+            -DENGINE_ENABLE_LLAMAFILE=OFF
+          cmake --build build --target audiocpp -j4
+          df -h
+
+      # The repo's gitignored vendored layout (see build.zig: the
+      # build auto-detects third-party/audiocpp when it exists):
+      #   third-party/audiocpp/include/audiocpp.h (+ engine/)
+      #   third-party/audiocpp/lib/libaudiocpp.so, libggml-base.so,
+      #   14 libggml-cpu-*.so, libggml.so (symlinks preserved with -a)
+      # The whole audio.cpp source tree (~715 MB: 253 MB source +
+      # 462 MB build) is deleted right after the copy, before the
+      # models are downloaded — disk is the tight constraint.
+      - name: Vendor audio.cpp, reclaim disk
+        run: |
+          mkdir -p third-party/audiocpp/lib third-party/audiocpp/include
+          cp -a audio.cpp/build/bin/*.so* third-party/audiocpp/lib/
+          cp -a audio.cpp/include/. third-party/audiocpp/include/
+          ls third-party/audiocpp/lib/
+          ls third-party/audiocpp/include/
+          rm -rf audio.cpp
+          df -h
+
+      # -Dcpu=baseline: portable binary; runners are heterogeneous
+      # (a native-target binary died with SIGILL on the dev VM after
+      # a host CPU change). build.zig auto-detects
+      # third-party/audiocpp, so no -Daudiocpp-dir flag is needed.
+      - name: Build sando-audio
+        run: zig build -j4 -Dcpu=baseline
+
+      # Public Hugging Face URLs, no auth. Byte sizes verified by
+      # HEAD against the resolve URLs (Content-Length after redirect)
+      # and checked again after download — a truncated download
+      # fails the job here instead of failing mysteriously in TTS.
+      - name: Download models
+        run: |
+          mkdir -p models
+          curl -fSL -o models/moonshine-streaming-small-q8_0.gguf \
+            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-small-q8_0.gguf
+          test "$(stat -c%s models/moonshine-streaming-small-q8_0.gguf)" = "300622464"
+          curl -fSL -o models/qwen3-tts-12hz-0.6b-base-q8_0.gguf \
+            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Qwen3-TTS-12Hz-0.6B-Base-GGUF/qwen3-tts-12hz-0.6b-base-q8_0.gguf
+          test "$(stat -c%s models/qwen3-tts-12hz-0.6b-base-q8_0.gguf)" = "1991217728"
+          df -h
+
+      - name: Config and models sanity
+        run: |
+          ./zig-out/bin/sando-audio config validate config/sando.toml
+          ./zig-out/bin/sando-audio models list
+
+      # Run from the repo root: the tests read repo-relative files
+      # (running the test binary from the wrong cwd fails 2 tests).
+      # `zig build test` runs the suite once through the build
+      # system; the test binary is then run directly, which is the
+      # authoritative check (a repeat `zig build test` on an
+      # unchanged tree is a cache no-op). The count is NOT
+      # hardcoded — any non-zero exit fails the job.
+      - name: Full test suite
+        run: |
+          zig build test -j4 -Dcpu=baseline
+          TEST_BIN=$(find .zig-cache/o -maxdepth 2 -type f -name test | head -n 1)
+          echo "test binary: $TEST_BIN"
+          test -n "$TEST_BIN"
+          "$TEST_BIN"
+
+      # doctor prints (src/doctor.zig):
+      #   audio.cpp: linked (abi 0x300, build 0.9.5, 17 tasks, 148 families)
+      - name: Doctor — audio.cpp 0.9.5, 148 families
+        run: |
+          ./zig-out/bin/sando-audio doctor > doctor.txt
+          cat doctor.txt
+          grep -F "audio.cpp: linked (abi 0x300, build 0.9.5, 17 tasks, 148 families)" doctor.txt
+
+      # The exact command from the README. The model is whichever
+      # one the config's qwen3-tts-0.6b entry points at (today the
+      # stock base model). No voice profile is enrolled: the engine
+      # passes no voice to the TTS path (the config's `voice` label
+      # is only a cache key), so there is no `voices enroll-*` step.
+      # A real TTS WAV for this sentence at 24 kHz mono 16-bit is
+      # tens of KB; under 10 KB means something went wrong.
+      - name: TTS smoke — stock base model, config-driven
+        run: |
+          ./zig-out/bin/sando-audio run --task tts --text "Hello, this is Sando." --out /tmp/tts-smoke.wav
+          test -s /tmp/tts-smoke.wav
+          test "$(stat -c%s /tmp/tts-smoke.wav)" -ge 10240
+          ls -l /tmp/tts-smoke.wav
+
+      # ASR prints the transcript raw to stdout
+      # (src/cli.zig: writeAsrOutput). The VM's live ASR rendered
+      # "Sando" as "sandos", so the check is the substring "sando",
+      # case-insensitive.
+      - name: ASR round-trip — transcribe the TTS output
+        run: |
+          ./zig-out/bin/sando-audio run --task asr --wav /tmp/tts-smoke.wav > /tmp/asr-roundtrip.txt
+          cat /tmp/asr-roundtrip.txt
+          grep -i "sando" /tmp/asr-roundtrip.txt
