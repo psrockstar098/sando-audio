@@ -1,4 +1,201 @@
-# SANDO Audio — Phase 3 STATUS
+# SANDO Audio — Phase 4 STATUS
+
+Phase 4 (Liberian Language & Voice Intelligence): **COMPLETE, builder
+verification below**, 2026-11-15. Built and tested on this VM (Intel
+Xeon Platinum 8321HC, 4 cores, AVX-512, Ubuntu 24.04, glibc 2.39, Zig
+0.17.1). **NOT yet independently verified by D, NOT pushed** —
+origin/main is still the Phase 3 head (`52b5bab`); this tree is local
+only until D verifies and pushes.
+
+## Phase 4 verification summary (builder, this session)
+
+`zig build` exit 0; test binary run directly = **All 109 tests passed,
+exit 0** (was 91/91 — 18 new Phase 4 tests); `converse` live with real
+English audio (exact ASR transcription, language-aware brain prompt,
+AdaptiveEar routing report). All identification/lookup numbers below
+are measured on the REAL dataset
+(`~/workspace/liberia-language-data/datasets/`, read-only, 38,494
+entries, 17 languages) with `language evaluate --limit 100`
+(10 languages loaded; 1,100 examples).
+
+| Check | Result |
+|---|---|
+| `zig build -j1 -Dcpu=baseline` | clean, exit 0 |
+| `zig build test -j1 -Dcpu=baseline`, test binary run directly | **109/109 tests pass** (was 91/91), exit 0 |
+| `language list` | 11 languages: en-lr [supported, Moonshine ASR], kq/bsq/kpe/vai/grb/kro/lom/mnk/gol/dnj [partial, no ASR/TTS] |
+| `language identify` live | "They fini fool we pekin them." → **kq, 1.00** (kq 7.0 / en 1.0); "dō" → **bsq, 1.00**; "The book is on the table and I have read it." → **en-lr, 0.64** (lom still scores 8.0 vs en 7.0 — the margin rule below is what makes it English) |
+| `language vocab` live | `fini` (kq) → 8 real cited entries (koloqua_00005/00062/00063/00064/00065/00162/00778/00779); `one` (bsq) → "dō" (bassa_00001) + Bassa Vah UDHR |
+| `language pronounce` live | `dō` (bsq) → "dō (syllables: dō, heuristic), 'one' (bassa_00001)"; `pekin` (kq) → attested "They fini fool we pekin them." (koloqua_00005), syllables heuristic |
+| `language route` live | "I de go to the market today." → kq, asr none, fallback moonshine-small, honest "no Koloqua ASR model exists yet" message, confidence 0.43 |
+| `language evaluate` (real dataset, limit 100) | **identification 846/1100 = 76.9%** — kq 27%, en-lr 59%, bsq 86%, kpe 100%, vai 84%, grb 85%, kro 77%, lom 69%, mnk 74%, gol 85%, dnj 100%; **code-switch 8/100 boundaries, precision 0.03, recall 0.08** (236 predicted switches) |
+| `languageforge validate` live | valid contribution (scope `asr,training`) → "valid contribution: test_00001 [kq]"; scope `research` correctly rejected ("scope must allow asr or training"), exit 1 |
+| `talk` (Polyglot text) live | `talk "I de go." --language kq` → Sando answers **"I de go."** (verbatim koloqua_00043); `talk "Hello, how are you?" --language en` → greeting; TTS honestly unavailable in both |
+| Live `converse` (Moonshine-Streaming-small, mock brain) | **PROVEN with real speech**: `hello.wav` ("Hello, this is Sando speaking in Liberian English.") → transcribed **exactly**, identified en-lr (confidence 0.25, 2/8 tokens scored), mock brain answered, `asr=ran brain=ran tts=unavailable`; `--language kq` run detects en-lr (the audio IS English) and reports the routing honestly |
+| TTS (Qwen3-TTS-0.6B-Q8_0, 1.9 GB) | **Still not runnable on this VM** — guard refuses honestly: "tts skipped: model qwen3-tts-0.6b is 1898 MB but only 384 MB is free" |
+| C API language entry points | present: `sando_language_count`, `sando_language_code`, `sando_language_name`, `sando_language_identify` (**26 exports total**, was 22); unit-tested (count 11, code[0]="en-lr", name("kq")="Koloqua", unknown → null) |
+| Weights / dataset in git | none — `models/` gitignored; the dataset is read-only outside the repo and only short cited fixture phrases appear in tests |
+| audio.cpp version shipped | **0.9.3 prebuilt, NOT 0.9.5** (unchanged — the 0.9.5 source build remains an open follow-up) |
+
+## Phase 4 modules (what landed)
+
+- Vocabulary (`src/vocabulary.zig`): `Dataset` (arena-owned entries,
+  `loadJson`/`loadFile`), `Vocabulary` (per-language registry),
+  tokenize (apostrophes + tone marks kept), whole-word lookup +
+  English→language lookup, lazy word-set for identification. Every
+  match carries its dataset id + source for citation.
+- Language (`src/language.zig`): 11-language registry (order en-lr,
+  kq, bsq, kpe, vai, grb, kro, lom, mnk, gol, dnj), `normalizeCode`
+  ("en"→"en-lr", names, "gio"→"dnj"), marker+wordlist identification,
+  code-switch detection, `promptFor` (language-aware brain prompts).
+- Pronunciation (`src/pronunciation.zig`): attested-form lookup +
+  mechanical syllabify, always labelled heuristic.
+- AdaptiveEar (`src/adaptive_ear.zig`): ASR routing decisions +
+  correction lexicon (hash-map, replace frees the old value, not the
+  original key — see the double-free fix below).
+- LanguageForge (`src/languageforge.zig`): contribution schema +
+  validation + JSON (schema only — no storage backend, no audio
+  collected, no recordings).
+- Evaluation (`src/evaluate.zig`): identification + code-switch
+  evaluator over real labeled examples (first N in file order,
+  deterministic; Koloqua = first N attested `response`, English =
+  the paired `standard_english`; code-switch = real Koloqua response
+  + real English sentence of a different entry, boundary known by
+  construction, ±1 word tolerance).
+- Wiring: `conversation.zig` renderPrompt adds a language line via
+  `lang.promptFor`; `brain.zig` MockBrain gained 5 Koloqua rules with
+  VERBATIM dataset replies (cited ids: koloqua_00043/00005/00110/
+  00109/00150); `cli.zig` new commands (`language list/identify/
+  vocab/pronounce/route/evaluate`, `languageforge validate`, `talk`,
+  converse AdaptiveEar routing report); version bump 0.3.0 → 0.4.0.
+
+## Phase 4 measured accuracy — how the numbers moved
+
+All on the same eval (`language evaluate --data-dir <real> --limit
+100`, 1,100 examples). Three fixes were made during verification,
+each measured before/after:
+
+| Step | Identification | kq | en-lr |
+|---|---|---|---|
+| Count-based scoring only (baseline) | 72.8% (801/1100) | 13% | 10% |
+| + strong-Koloqua-marker rule | 74.1% (815/1100) | 27% | 10% |
+| + short-ASCII word rule | 75.5% (831/1100) | 27% | 44% |
+| + wordlist-vs-English margin rule | **76.9% (846/1100)** | 27% | 59% |
+
+- **Strong-marker rule** (`language.zig`): a Koloqua marker with
+  weight ≥ 2 (de/fini/na/nohn/dor/pekin/ain't/yah/sor/self) decides
+  Koloqua outright. Koloqua shares English's lexicon, so count-based
+  scoring loses to English common words on most real Koloqua
+  sentences ("The Minister them coming." has "the"+"them" against a
+  single weak marker). A strong marker is essentially never plain
+  English.
+- **Short-ASCII rule** (`vocabulary.zig`): 1–2 byte all-ASCII tokens
+  do not enter the word set and never match ("a", "is", "to", "na",
+  "go" collide across languages and with English). Before it, a plain
+  English sentence scored lom=10 on five such collisions. Accented
+  short words still count ("dō" is 3 bytes; "à" is non-ASCII). Cost:
+  Bassa recall 99% → 86% (some Bassa words are 2 ASCII chars).
+- **Margin rule** (`language.zig`): a wordlist language must beat
+  English by ≥ 2 points (a full word) to be chosen when English
+  scored at all. The wordlists contain English-looking tokens from
+  dirty entries (lorma_02152 puts "read book" in the Lorma set;
+  lorma_00593, a grammar note, puts "the" there), so a 1-point edge
+  is noise. Single-word wordlist examples still win (English 0).
+
+## Phase 4 bugs found during verification (all fixed, all in-tree)
+
+1. **Use-after-free segfault in `Dataset.loadJson`** — the real bug
+   behind the first failing runs. `std.json.parseFromSlice` with the
+   default `.alloc_if_needed` leaves string slices pointing INTO the
+   input `bytes`, which `loadFile` frees on return — every Entry
+   dangled (proven by a probe that segfaulted in `tokenize`). Fix:
+   `parseFromSliceLeaky` + `.allocate = .alloc_always` (strings
+   copied into the Dataset arena) + `.ignore_unknown_fields = true`
+   (real files carry region/register/notes/license, which the
+   struct does not declare — that was also why the CLI reported
+   `InvalidJson` on the real dataset). `voicedna.zig` and
+   `languageforge.zig` were checked and are safe (they dupe before
+   deinit).
+2. **Zig 0.17.1 shadowing** — a parameter named `language` shadows
+   the `language` module import (compile error). Fixed by aliasing
+   the import to `lang` in `conversation.zig` and `c_api.zig` (and
+   renaming a test-local `lang` to `lang_code`).
+3. **`std.ArrayList.writer` + `std.json.stringify` do not exist in
+   0.17.1** — `languageforge.zig` stringify now uses
+   `std.json.Stringify.valueAlloc`; `Language.code`/`name` are
+   `[:0]const u8` so the C API can return them as NUL-terminated.
+4. **Double free in `CorrectionLexicon.add`** — `fetchPut` returns
+   the old key AND value, but the map keeps the ORIGINAL key, so
+   freeing `old.key` freed a live key (proven by a panic trace).
+   Fix: free the new (unstored) key + the old value.
+5. **Code-switch `switches` always 0** — computed from
+   `segments.items.len` AFTER `toOwnedSlice` emptied the list.
+   Fixed by counting before the move.
+
+## Phase 4 dataset facts (measured, not from the brief)
+
+- Koloqua: **11,780 entries = 10,940 `expansion_*` (pattern-derived)
+  + 840 non-expansion (attested)**. The brief said 778 attested;
+  the measured count is **840 — a 62-entry discrepancy to note
+  honestly** (counted by `types` prefix, 2026-11-15). Attested
+  types: dictionary_gloss 594, parallel_sentence 81, song_lyric 35,
+  negation 26, tense_aspect_general 14, aspect_habitual 10,
+  tense_completive 9, proverb 7, tense_future_proximate 6,
+  plural_marking 6, pronouns 6, copula 5, tense_progressive 5,
+  tense_past 5, modality 4, tense_perfect 4, tense_future 3,
+  copula_absence 2, possession 2, complementizer_say 1,
+  copula_locative 1, determiners 1, grammar_example 1,
+  preposition 1.
+- Attested Koloqua entries are mostly SHORT: **75% are ≤ 3 words**,
+  and only **6% carry a strong marker** — that is the ceiling on
+  the 27% kq number below, not a bug in the scorer.
+- Wordlist languages' first-100 eval examples are not all
+  wordlist-type: kpelle/vai/gola/dnj first-100 are
+  parallel_sentence/dictionary_gloss/parallel_verse — the word set
+  must (and does) include those entry types, which is why dirty
+  entries can pollute it (see margin rule).
+- Single-word identification is ambiguous across wordlists: "dō"
+  scores bsq/vai/grb/kro/lom/mnk 2.0 each; the tie breaks in
+  registry order (bsq first). Recorded as a limitation, not fixed.
+
+## Phase 4 honest gaps
+
+1. **Koloqua ASR and TTS cannot run on this VM** — no Koloqua ASR
+   model exists and no Koloqua TTS voice exists; the 2 GB Qwen3-TTS
+   model cannot load here anyway. `route` and `talk`/`converse`
+   say so explicitly (Moonshine-English fallback for ASR, TTS
+   unavailable). Koloqua conversation is TEXT ONLY in this phase.
+2. **Koloqua identification is 27% on attested entries** (limit
+   100) — because 75% of attested entries are ≤ 3-word glosses and
+   only 6% carry a strong marker. On full sentences with markers
+   the unit tests pass 100% (all real Koloqua sentences tested).
+   The evaluator's first-N selection measures glosses, not
+   conversation; a sentence-weighted eval set would read higher.
+3. **English identification is 59%** (limit 100) — short English
+   translations are marker-sparse and often abstain as "und"
+   rather than misclassifying (with only the Koloqua vocab loaded,
+   the first 100 English translations had 0 wrong-language errors:
+   73 right, 27 und). With all wordlists loaded the remaining
+   errors are wordlist steals, mostly fixed by the margin rule
+   (en 10% → 59% across the three fixes).
+4. **Code-switch detection is poor on constructed examples**
+   (8/100 boundaries, precision 0.03, recall 0.08, 236 predicted
+   switches) — it over-predicts because Koloqua halves contain
+   English words that flip the tag. The unit test on a real
+   constructed sentence passes; the evaluator's concatenated
+   pairs are artificial. Real conversational code-switching needs
+   longer runs and a run-length gate (Phase 5 refinement, not
+   attempted here).
+5. **Dirty dataset entries pollute word sets** (lorma_02152,
+   lorma_00593) — mitigated by the margin rule, NOT cleaned: the
+   dataset is read-only and is never modified by this project.
+6. **LanguageForge is schema-only** — validation + JSON, no storage
+   backend, no audio collected, no recordings. The consent rule
+   (scope must allow asr or training) is enforced at validation.
+7. **No model training** — the engine runs models; Koloqua comes
+   from the LoRA fine-tune track, not from this phase.
+8. **audio.cpp 0.9.5 not landed** (unchanged).
+
+## Phase 3 STATUS (unchanged record below)
 
 Phase 3 (Intelligence & Conversational AI): **COMPLETE, builder-verified
 and VERIFIED INDEPENDENTLY BY D from a clean worktree**, 2026-11-15.

@@ -1,21 +1,24 @@
-# SANDO Audio — Phase 3: Intelligence & Conversational AI
+# SANDO Audio — Phase 4: Liberian Language & Voice Intelligence
 
 A real-time African voice intelligence engine, engineered in Zig,
 Liberia-first (Liberian English + Koloqua P0). This repository is the
 Zig orchestration/runtime layer over [audio.cpp](https://github.com/0xShug0/audio.cpp)
 via its public C ABI.
 
-Phase 3 is the conversation layer: BrainLink (mock, in-process agent,
-and OpenAI-compatible HTTP brains), streaming brain replies, incremental
-TTS generation, speech-to-brain-to-speech over the Phase 2 LiveStream
-Engine, conversation orchestration with bounded history, intelligent
-turn-taking, and interruption-aware barge-in (VoiceContinuum). Nothing
-is faked — when a backend or a model is missing, the engine says so
-instead of simulating success.
+Phase 4 is the language layer: an 11-language registry (Liberian
+English, Koloqua, Bassa, Kpelle, Vai, Grebo, Kru, Lorma, Mano, Gola,
+Dan), dataset-backed identification, code-switch detection,
+vocabulary/slang lookup, pronunciation, Polyglot conversation
+(`talk`, `converse --language`), AdaptiveEar ASR routing, a
+LanguageForge contribution schema (validation only — no recordings
+collected), and a measured-accuracy evaluator over real labeled
+examples from the dataset. Nothing is faked — when a model or a
+language capability is missing, the engine says so instead of
+simulating success.
 
 ## Status
 
-Phase 3 is complete and builder-verified on this machine (D's
+Phase 4 is complete and builder-verified on this machine (D's
 independent verification pending before push). See
 [STATUS.md](STATUS.md) for the per-item checklist with exact
 verification results.
@@ -23,15 +26,20 @@ verification results.
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
 - audio.cpp 0.9.3 prebuilt (ABI 0.2.0), 17 tasks, 133 model families
   (0.9.5 was ordered but did not land in Phase 2 — see STATUS.md)
-- 91 unit tests, all passing, no leaks
+- **109 unit tests, all passing, no leaks** (was 91 in Phase 3)
+- Measured on the real dataset (38,494 entries, 17 languages):
+  identification **76.9%** (846/1100, limit 100) — wordlist
+  languages 65–100%, Koloqua 27% (mostly ≤3-word glosses; sentences
+  with markers pass), English 59%; code-switch 8/100 boundaries
+  (precision 0.03, recall 0.08 — honest gap, see STATUS.md)
 - Live `converse` verified with Moonshine-Streaming-small (287 MB):
-  real speech → exact transcript → mock brain reply; barge-in proven
-  live (reply cut short, interrupt transcribed, follow-up delivered);
-  multi-turn history and the SmartCache ASR leg proven live; the HTTP
-  brain proven live against a local mock server (no keys, no cloud)
-- TTS is still not runnable on this VM: the new size guard refuses the
-  1.9 GB model load honestly ("only ~577–1094 MB is free")
-- Library `libsando.a` + CLI `sando-audio` + C API + sample plugin
+  real speech → exact transcript → mock brain reply, language-aware
+  prompt, AdaptiveEar routing report; `talk` answers Koloqua in
+  Koloqua with verbatim dataset replies (cited)
+- TTS is still not runnable on this VM: the size guard refuses the
+  1.9 GB model load honestly ("only 384 MB is free")
+- Library `libsando.a` + CLI `sando-audio` + C API (26 exports) +
+  sample plugin
 
 ## Build
 
@@ -136,10 +144,20 @@ docs/           API.md — library, C API, plugin ABI, config schema
   the model list requires a restart; backend and flag changes reload
   live. The engine refuses to dangle pointers instead of guessing.
 
-## What Phase 3 does NOT do (honest gaps)
+## What Phase 4 does NOT do (honest gaps)
 
+- Koloqua ASR and TTS do not exist yet — Koloqua conversation is
+  text only in this phase; `route` says so and falls back to
+  Moonshine (English) honestly. No Koloqua audio has been generated
+  or transcribed by a Koloqua model.
+- Koloqua identification is 27% on the dataset's attested entries
+  (mostly ≤3-word glosses; only 6% carry a strong marker). Full
+  sentences with markers identify correctly.
+- Code-switch detection is poor on constructed examples (8/100
+  boundaries, precision 0.03, recall 0.08) — it over-predicts
+  switches because Koloqua halves contain English words.
 - TTS inference is NOT yet verified live: the Qwen3-TTS weight is
-  1.86 GiB and this VM has ~0.6–1.1 GB free, so the new size guard
+  1.86 GiB and this VM has ~0.4–1.1 GB free, so the size guard
   refuses the load instead of OOMing (see STATUS.md). ASR, the brain,
   and barge-in are verified live.
 - No real cloud brain has been called — the HTTP brain was proven only

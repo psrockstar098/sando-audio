@@ -360,6 +360,41 @@ pub fn benchMemory(io: Io, alloc: Allocator, iterations: usize) !BenchResult  //
 pub fn benchInference(engine: *Engine, task: runtime.Task, text: ?[]const u8, iterations: usize) !BenchResult // needs a live session; returns error.ModelNotLoaded otherwise
 ```
 
+### language — Phase 4 (`src/language.zig`, `src/vocabulary.zig`, `src/pronunciation.zig`, `src/adaptive_ear.zig`, `src/languageforge.zig`, `src/evaluate.zig`)
+
+```zig
+// language.zig: 11-language registry (en-lr, kq, bsq, kpe, vai, grb, kro, lom, mnk, gol, dnj)
+pub const Language = struct { code: [:0]const u8, name: [:0]const u8, dataset_file: ?[]const u8, status: Status, script: []const u8, asr: ?[]const u8, tts: bool };
+pub const registry: [11]Language;
+pub fn normalizeCode(input: []const u8) ?[]const u8 // "en" -> "en-lr", names, "gio" -> "dnj"
+pub fn identify(alloc: Allocator, text: []const u8, vocab: ?*const vocabulary.Vocabulary) !Identification // marker + wordlist scoring; strong Koloqua marker (weight >= 2) decides Koloqua outright; a wordlist language must beat English by >= 2 points
+pub fn detectSwitches(alloc: Allocator, text: []const u8, vocab: ?*const vocabulary.Vocabulary) !CodeSwitchResult // segments + switch count; shared words ("go", "them") do not switch a run
+pub fn promptFor(language: []const u8) []const u8 // language-aware brain prompt line
+// vocabulary.zig: dataset-backed lookup; files live OUTSIDE the repo (read-only, --data-dir), never bulk-copied in
+pub const Entry = struct { id, kind, input, response, standard_english, source: []const u8 }; // kind is the dataset "types" field
+pub const Dataset = struct { pub fn loadJson(alloc, language, bytes) VocabError!Dataset; pub fn loadFile(alloc, io, language, path) VocabError!Dataset; pub fn lookup(self, alloc, word, max) ![]Match; pub fn lookupEnglish(self, alloc, word, max) ![]Match; pub fn containsWord(self, word) !bool }; // word set: response words only; 1-2 byte all-ASCII tokens excluded (collision rule, see STATUS.md)
+pub const Vocabulary = struct { pub fn load(self, io, code, path) VocabError!void; pub fn dataset(self, code) ?*Dataset };
+// pronunciation.zig
+pub fn lookup(alloc, vocab, language, word) !?Pronunciation // attested form + source, or null
+pub fn syllabify(alloc, word) ![]const u8 // mechanical vowel-group split, always labelled heuristic
+// adaptive_ear.zig
+pub const Routing = struct { language, asr_model: ?[]const u8, fallback: ?[]const u8, confidence: f32, note: []const u8 };
+pub fn route(language: []const u8) Routing // honest: kq + indigenous -> asr none, Moonshine fallback
+pub const CorrectionLexicon = struct { pub fn add(self, wrong, right) !void; pub fn correct(self, alloc, text) ![]const u8 };
+// languageforge.zig: contribution schema + validation + JSON only (no storage backend, no audio collected)
+pub const Contribution = struct { id, language, transcript, audio_sha256, audio_format, duration_ms, speaker_id: []const u8, consent: Consent };
+pub fn validate(alloc, c: *const Contribution) ![]Problem // consent required; scope must allow asr or training
+pub fn parse(alloc, bytes) !Contribution; pub fn stringify(alloc, c: *const Contribution) ![]const u8
+// evaluate.zig: measured accuracy on real labeled examples (first N in file order, deterministic)
+pub fn evaluateIdentification(alloc, vocab, limit) !IdentificationEval // kq attested responses + paired standard_english; wordlist languages first N responses
+pub fn evaluateCodeSwitch(alloc, vocab, limit) !CodeSwitchEval // real Koloqua response + real English sentence of a different entry; boundary known by construction, +/-1 word tolerance
+```
+
+Measured on the real dataset (limit 100): identification 76.9%
+(846/1100); code-switch 8/100 boundaries, precision 0.03, recall
+0.08. See STATUS.md for the per-language table and the three
+scoring rules the numbers rest on.
+
 ## C API (`src/c_api.zig`)
 
 Plain C ABI, single engine per process. Link `libsando.a` + libc.
@@ -410,6 +445,19 @@ size_t sando_conversation_history_count(void *conversation); // 2 per ask (user 
 void  sando_conversation_destroy(void *conversation);
 ```
 
+Phase 4 language entry points. No engine needed — identification is
+text-only (marker + wordlist scoring over the built-in registry; the
+wordlist half needs no dataset loaded for Koloqua/English, and
+returns "und" for indigenous languages until a dataset is loaded
+through the CLI path). Returns point at static strings; do not free.
+
+```c
+size_t      sando_language_count(void); // 11
+const char *sando_language_code(size_t index); // "en-lr", "kq", "bsq", ...; NULL past the end
+const char *sando_language_name(const char *code); // "Koloqua"; NULL for unknown codes
+const char *sando_language_identify(const char *text); // language code, or "und" when nothing scores
+```
+
 ## Plugin ABI (`src/plugin.zig`)
 
 A plugin is a `.so` exporting one symbol:
@@ -449,6 +497,14 @@ sando-audio vad [--config <path>] [--wav <in.wav>]
 sando-audio converse [--config <path>] [--wav <turn.wav> ...] [--interrupt <in.wav>]
                      [--brain mock|http] [--brain-url <url>] [--brain-model <name>]
                      [--voice <name>] [--language <lang>] [--cache] [--out-dir <dir>]
+sando-audio talk <text> [--language <lang>] [--voice <name>] [--correct wrong=right ...]
+sando-audio language list
+sando-audio language identify <text> [--data-dir <dir>]
+sando-audio language vocab <word> [--language <lang>] --data-dir <dir>
+sando-audio language pronounce <word> [--language <lang>] --data-dir <dir>
+sando-audio language route <text>
+sando-audio language evaluate [--data-dir <dir>] [--limit <n>]
+sando-audio languageforge validate <file>
 sando-audio voices list
 sando-audio voices enroll-synthetic <id> <name> [--language <lang>]
 sando-audio voices delete <id>
