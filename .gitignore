@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+third-party/
+*.o
+*.a
+*.so
