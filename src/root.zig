@@ -14,6 +14,14 @@ pub const plugin = @import("plugin.zig");
 pub const engine = @import("engine.zig");
 pub const audio = @import("audio.zig");
 pub const c_api = @import("c_api.zig");
+
+// Force the C API's `export` functions into the library object.
+// Without a reference, Zig's lazy analysis never looks at c_api.zig
+// and the sando_* symbols are missing from libsando.a entirely
+// (found 2026-11-15 when the C example failed to link).
+comptime {
+    _ = c_api;
+}
 pub const cli = @import("cli.zig");
 pub const doctor = @import("doctor.zig");
 pub const bench = @import("bench.zig");
@@ -31,9 +39,11 @@ pub const pronunciation = @import("pronunciation.zig");
 pub const adaptive_ear = @import("adaptive_ear.zig");
 pub const languageforge = @import("languageforge.zig");
 pub const evaluate = @import("evaluate.zig");
+pub const oneapi = @import("oneapi.zig");
+pub const server = @import("server.zig");
 
-pub const version = "0.4.0";
-pub const version_string = "sando-audio 0.4.0 (Phase 4: Liberian Language & Voice Intelligence)";
+pub const version = "0.5.0";
+pub const version_string = "sando-audio 0.5.0 (Phase 5: Developer Ecosystem, Production & Applications)";
 
 test {
     // Zig 0.17 only collects test blocks from files referenced inside a
@@ -65,4 +75,6 @@ test {
     _ = @import("adaptive_ear.zig");
     _ = @import("languageforge.zig");
     _ = @import("evaluate.zig");
+    _ = @import("oneapi.zig");
+    _ = @import("server.zig");
 }

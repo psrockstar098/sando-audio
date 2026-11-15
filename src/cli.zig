@@ -42,9 +42,11 @@ const pronunciation = @import("pronunciation.zig");
 const adaptive_ear = @import("adaptive_ear.zig");
 const languageforge = @import("languageforge.zig");
 const evaluate = @import("evaluate.zig");
+const oneapi = @import("oneapi.zig");
+const server = @import("server.zig");
 
 pub const usage =
-    \\sando-audio 0.4.0 — SANDO Audio, Phase 4 (Liberian Language & Voice Intelligence)
+    \\sando-audio 0.5.0 — SANDO Audio, Phase 5 (Developer Ecosystem, Production & Applications)
     \\
     \\Usage:
     \\  sando-audio version
@@ -72,6 +74,10 @@ pub const usage =
     \\  sando-audio bench [--config path] [--model name] [--task asr|tts]
     \\                    [--iterations n] [--text "..."]
     \\  sando-audio models list [--config path]
+    \\  sando-audio models install <path> [--name n] [--kind stt|tts|vad] [--config path]
+    \\  sando-audio models remove <name> [--config path]
+    \\  sando-audio serve [--config path] [--host 127.0.0.1] [--port 8080]
+    \\                   [--max-sessions 32] [--data-dir dir]
     \\  sando-audio plugins list [--dir path]
     \\  sando-audio plugins load <path>
     \\  sando-audio plugins load --manifest <path>
@@ -121,6 +127,15 @@ pub const BenchOpts = struct {
     text: ?[]const u8 = null,
 };
 
+/// Options for `serve` (the OneAPI REST server, Phase 5).
+pub const ServeOpts = struct {
+    config_path: []const u8 = engine.default_config_path,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = server.default_port,
+    max_sessions: usize = server.default_max_sessions,
+    data_dir: ?[]const u8 = null,
+};
+
 /// Which brain answers a `converse` turn. `mock` is the scripted
 /// local brain; `http` posts to an OpenAI-compatible endpoint
 /// (local/unauthenticated only — no Authorization header is sent,
@@ -164,6 +179,18 @@ pub const TalkOpts = struct {
     correct: []const []const u8 = &.{},
 };
 
+pub const ModelsInstallOpts = struct {
+    path: []const u8,
+    name: ?[]const u8,
+    kind: []const u8,
+    config_path: []const u8,
+};
+
+pub const ModelsRemoveOpts = struct {
+    name: []const u8,
+    config_path: []const u8,
+};
+
 pub const Command = union(enum) {
     version,
     doctor,
@@ -179,6 +206,9 @@ pub const Command = union(enum) {
     voices: VoicesOpts,
     bench: BenchOpts,
     models_list: struct { config_path: []const u8 },
+    models_install: ModelsInstallOpts,
+    models_remove: ModelsRemoveOpts,
+    serve: ServeOpts,
     plugins_list: struct { dir: []const u8 },
     plugins_load: struct { path: []const u8 },
     plugins_load_manifest: struct { path: []const u8 },
@@ -214,7 +244,62 @@ pub fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) ParseError!
             }
             return .{ .models_list = .{ .config_path = path } };
         }
+        if (args.len >= 3 and std.mem.eql(u8, args[1], "install")) {
+            var name: ?[]const u8 = null;
+            var kind: []const u8 = "stt";
+            var path: []const u8 = engine.default_config_path;
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--name")) {
+                    name = args[i + 1];
+                    i += 1;
+                } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--kind")) {
+                    kind = args[i + 1];
+                    i += 1;
+                } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--config")) {
+                    path = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .models_install = .{ .path = args[2], .name = name, .kind = kind, .config_path = path } };
+        }
+        if (args.len >= 3 and std.mem.eql(u8, args[1], "remove")) {
+            var path: []const u8 = engine.default_config_path;
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--config")) {
+                    path = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .models_remove = .{ .name = args[2], .config_path = path } };
+        }
         return error.Usage;
+    }
+
+    if (std.mem.eql(u8, cmd, "serve")) {
+        var opts = ServeOpts{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (i + 1 < args.len and std.mem.eql(u8, a, "--config")) {
+                opts.config_path = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--host")) {
+                opts.host = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--port")) {
+                opts.port = std.fmt.parseInt(u16, args[i + 1], 10) catch return error.Usage;
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--max-sessions")) {
+                opts.max_sessions = std.fmt.parseInt(usize, args[i + 1], 10) catch return error.Usage;
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--data-dir")) {
+                opts.data_dir = args[i + 1];
+                i += 1;
+            } else return error.Usage;
+        }
+        return .{ .serve = opts };
     }
 
     if (std.mem.eql(u8, cmd, "plugins")) {
@@ -658,7 +743,88 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
         .languageforge_validate => |v| return cmdLanguageForgeValidate(alloc, io, out, v.path),
         .voices => |opts| return cmdVoices(alloc, io, out, opts),
         .bench => |opts| return cmdBench(alloc, io, out, opts),
+        .models_install => |opts| return cmdModelsInstall(alloc, io, out, opts),
+        .models_remove => |opts| return cmdModelsRemove(alloc, io, out, opts),
+        .serve => |opts| return cmdServe(alloc, io, out, opts),
     }
+}
+
+/// Install a model file into models/ (see models.installModel).
+fn cmdModelsInstall(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: ModelsInstallOpts) !u8 {
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    defer eng.deinit();
+    const kind = config.ModelKind.fromName(opts.kind) orelse {
+        std.debug.print("kind must be one of stt, tts, vad\n", .{});
+        return 2;
+    };
+    const name = opts.name orelse std.Io.Dir.path.basename(opts.path);
+    const rec = models.installModel(alloc, io, &eng.registry, opts.path, name, kind, "models") catch |err| {
+        std.debug.print("cannot install {s} ({t})\n", .{ opts.path, err });
+        return 1;
+    };
+    try out.print("installed {s} [{s}] {s} ({d} bytes, sha256 in models/{s}.json)\n", .{ rec.name, @tagName(rec.kind), rec.path, rec.size_bytes, rec.name });
+    try out.flush();
+    return 0;
+}
+
+/// Remove a model from the registry and delete its file + manifest.
+fn cmdModelsRemove(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: ModelsRemoveOpts) !u8 {
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    defer eng.deinit();
+    models.removeModel(alloc, io, &eng.registry, opts.name, "models") catch |err| {
+        std.debug.print("cannot remove {s} ({t})\n", .{ opts.name, err });
+        return 1;
+    };
+    try out.print("removed {s}\n", .{opts.name});
+    try out.flush();
+    return 0;
+}
+
+/// Start the OneAPI REST server. Runs until killed (Ctrl-C).
+fn cmdServe(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: ServeOpts) !u8 {
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    errdefer eng.deinit();
+    var vocab: ?vocabulary.Vocabulary = null;
+    if (opts.data_dir) |dir| {
+        vocab = loadVocabulary(alloc, io, dir) catch |err| {
+            std.debug.print("cannot load dataset from {s} ({t})\n", .{ dir, err });
+            return 1;
+        };
+        try out.print("(dataset: {d} language(s) loaded)\n", .{vocab.?.languageCount()});
+    }
+    const api_key = oneapi.readApiKey();
+    if (api_key == null) {
+        try out.print("WARNING: no SANDO_API_KEY set — the server is in OPEN DEV MODE (anyone on this machine can call it)\n", .{});
+    }
+    if (std.mem.eql(u8, opts.host, "0.0.0.0")) {
+        try out.print("WARNING: listening on 0.0.0.0 — the server is reachable from the network\n", .{});
+    }
+    var srv = server.Server.init(alloc, io, .{
+        .host = opts.host,
+        .port = opts.port,
+        .max_sessions = opts.max_sessions,
+        .config_path = opts.config_path,
+        .api_key = api_key,
+    }, eng, vocab) catch |err| {
+        std.debug.print("cannot listen on {s}:{d} ({t})\n", .{ opts.host, opts.port, err });
+        return 1;
+    };
+    defer srv.deinit();
+    try out.print("sando-audio {s} listening on http://{s}:{d} (OneAPI, {d} max sessions)\n", .{
+        root.version, opts.host, srv.boundPort(), opts.max_sessions,
+    });
+    try out.flush();
+    srv.run();
+    return 0;
 }
 
 /// Lists the .so files in a directory. The directory MUST be opened with
@@ -1003,26 +1169,6 @@ fn cmdVad(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VadOp
 
 /// Free memory (bytes) from /proc/meminfo, or null when unreadable
 /// (non-Linux, or /proc not mounted). The TTS size guard uses it.
-fn memAvailableBytes(alloc: std.mem.Allocator, io: std.Io) ?u64 {
-    var file = std.Io.Dir.openFileAbsolute(io, "/proc/meminfo", .{}) catch return null;
-    defer file.close(io);
-    var buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &buf);
-    const text = reader.interface.readAllocShort(alloc, 1 << 20) catch return null;
-    defer alloc.free(text);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "MemAvailable:")) {
-            const rest = std.mem.trim(u8, line["MemAvailable:".len..], " \t");
-            var it = std.mem.tokenizeScalar(u8, rest, ' ');
-            const num = it.next() orelse return null;
-            const kb = std.fmt.parseInt(u64, num, 10) catch return null;
-            return kb * 1024;
-        }
-    }
-    return null;
-}
-
 /// Load the TTS model only when it fits in free memory. Returns null
 /// (with a plain message) when there is no room — the TTS leg is
 /// then skipped honestly instead of OOMing the machine.
@@ -1034,7 +1180,7 @@ fn loadTtsIfFits(
     tts_model: *const config.ModelEntry,
 ) !?runtime.Session {
     const size = models.fileSize(io, tts_model.file) catch 0;
-    if (memAvailableBytes(alloc, io)) |free| {
+    if (oneapi.memAvailableBytes(alloc, io)) |free| {
         if (size > free) {
             try out.print("tts skipped: model {s} is {d} MB but only {d} MB is free — this machine cannot load it\n", .{ tts_model.name, size >> 20, free >> 20 });
             return null;
@@ -1771,7 +1917,7 @@ test "parseArgs rejects bad input" {
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "run", "--task", "telepathy" }));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "bench", "--iterations", "0" }));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "config", "validate" }));
-    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "stream" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"stream"}));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"vad"}));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "voices", "enroll-synthetic", "only-id" }));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "voices", "delete" }));
@@ -1788,16 +1934,25 @@ test "parseArgs accepts converse with repeatable --wav" {
     const alloc = std.testing.allocator;
     const c = try parseArgs(alloc, &.{
         "converse",
-        "--wav",            "a.wav",
-        "--wav",            "b.wav",
-        "--interrupt",      "i.wav",
-        "--brain",          "http",
-        "--brain-url",      "http://127.0.0.1:11434/v1/chat/completions",
-        "--brain-model",    "local",
-        "--voice",          "v1",
-        "--language",       "kq",
+        "--wav",
+        "a.wav",
+        "--wav",
+        "b.wav",
+        "--interrupt",
+        "i.wav",
+        "--brain",
+        "http",
+        "--brain-url",
+        "http://127.0.0.1:11434/v1/chat/completions",
+        "--brain-model",
+        "local",
+        "--voice",
+        "v1",
+        "--language",
+        "kq",
         "--cache",
-        "--out-dir",        "out",
+        "--out-dir",
+        "out",
     });
     defer alloc.free(c.converse.wavs);
     try std.testing.expectEqual(@as(usize, 2), c.converse.wavs.len);

@@ -17,7 +17,7 @@ const brain = @import("brain.zig");
 const conversation = @import("conversation.zig");
 const lang = @import("language.zig");
 
-pub const version_string: [:0]const u8 = "0.4.0";
+pub const version_string: [:0]const u8 = "0.5.0";
 
 const CEngine = struct {
     threaded: std.Io.Threaded,
@@ -619,7 +619,7 @@ test "c api create fails honestly without a config file" {
     const e = sando_engine_create("config/does-not-exist.toml");
     try std.testing.expect(e == null);
     try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
-    try std.testing.expectEqualStrings("0.4.0", std.mem.span(sando_version()));
+    try std.testing.expectEqualStrings("0.5.0", std.mem.span(sando_version()));
     try std.testing.expectEqual(@as(c_int, -1), sando_config_validate("config/does-not-exist.toml"));
 }
 
