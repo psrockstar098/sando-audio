@@ -1,10 +1,12 @@
 //! Bindings to audio.cpp's public C ABI (audiocpp.h).
 //!
 //! Targets the ABI 0.2.0 surface (audio.cpp 0.9.3), which is also present
-//! in ABI 0.3.0 (0.9.5): the only addition in 0.3.0 is `audiocpp_log_set`,
-//! deliberately excluded here so the same bindings link against either
-//! library. The prebuilt 0.9.4/0.9.5 libraries require glibc 2.43 and do
-//! NOT load on Ubuntu 24.04 (glibc 2.39); the vendored 0.9.3 prebuilt does.
+//! in ABI 0.3.0 (0.9.5): the only additions in 0.3.0 are `audiocpp_log_set`
+//! and `audiocpp_session_create_with_impl`, deliberately excluded here so
+//! the same bindings link against either library. The prebuilt 0.9.4/0.9.5
+//! libraries require glibc 2.43 and do NOT load on Ubuntu 24.04 (glibc
+//! 2.39); the vendored library is now the 0.9.5 SOURCE build (built on
+//! this VM, `-DAUDIOCPP_VERSION=0.9.5`), which loads fine.
 //!
 //! When the engine is built without `-Daudiocpp-dir`, every call returns
 //! error.AudioCppNotLinked instead of touching a missing library. The

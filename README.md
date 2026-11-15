@@ -22,8 +22,8 @@ independent verification pending before push). See
 verification results.
 
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
-- audio.cpp 0.9.3 prebuilt (ABI 0.2.0), 17 tasks, 133 model families
-  (0.9.5 was ordered but did not land in Phase 2 — see STATUS.md)
+- audio.cpp 0.9.5 source-built on this VM (ABI 0.3.0), 17 tasks, 148 model families
+  (was the 0.9.3 prebuilt, 133 families — 0.9.5 landed 2026-11-15, see STATUS.md)
 - **126 unit tests, all passing, no leaks** (was 109 in Phase 4)
 - OneAPI live: health/version/languages/identify/vocab/pronounce/
   route, full conversation lifecycle, metrics, WebUI, VAD, real ASR
@@ -57,9 +57,11 @@ exists. The prebuilt is NOT committed — see `.gitignore`. The version in
 use is recorded in [STATUS.md](STATUS.md).
 
 > Prebuilt compatibility: audio.cpp 0.9.4/0.9.5 require glibc 2.43 and do
-> NOT load on Ubuntu 24.04 (glibc 2.39). The vendored 0.9.3 prebuilt
-> loads (max glibc 2.38). The bindings target ABI 0.2.0, which is also
-> present in ABI 0.3.0 (0.9.5 only adds `audiocpp_log_set`).
+> NOT load on Ubuntu 24.04 (glibc 2.39). The vendored library is the
+> 0.9.5 SOURCE build (built on this VM, max glibc 2.39) — it loads.
+> The bindings target ABI 0.2.0, which is also present in ABI 0.3.0
+> (0.9.5 only adds `audiocpp_log_set` and
+> `audiocpp_session_create_with_impl`).
 
 ## Configure
 

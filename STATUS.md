@@ -24,6 +24,33 @@ Builder's live numbers, also recorded: warmed ASR 1,112 ms; ModelHub
 install (300 MB, 201) + remove (200); all four SDK examples run green
 against the live server (C, JS, Python, Zig).
 
+## audio.cpp 0.9.5 — LANDED 2026-11-15 (source build, after Phase 5 push)
+
+The open follow-up from Phases 2–5 is CLOSED. The v0.9.5 release tag
+(`2b7e38e`) was built from source on this VM (the 0.9.5 prebuilt still
+cannot load here — glibc 2.43 required, VM has 2.39). Minimal
+configure: `AUDIOCPP_BUILD_C_API=ON`, all GPU backends OFF, llamafile
+OFF, all CPU variants ON, Release, `-g0`, `-j1`; build took ~80 min
+across a VM restart (resumed incrementally from 320 objects — the
+build dir under `~/workspace/tmp/audio.cpp-0.9.5/build` persists).
+Header diff 0.9.3 → 0.9.5 is 43 lines: ABI 0.2.0 → 0.3.0, adds
+`audiocpp_log_set` + `audiocpp_session_create_with_impl`, nothing
+removed or re-signed — the existing bindings link unchanged. The
+vendored libs in `third-party/audiocpp` (gitignored) are now the
+0.9.5 build: `libaudiocpp.so` + `libggml-base.so` + all 14 CPU
+variants; `audiocpp_abi_version()` reports `0x300`,
+`audiocpp_build_version()` reports `0.9.5` (stamped with
+`-DAUDIOCPP_VERSION=0.9.5` — the default stamp is the useless
+`"dev"`). Doctor: **audio.cpp linked (abi 0x300, build 0.9.5, 17
+tasks, 148 families)** — 148 families, up from 133 in 0.9.3.
+
+One code change came with the swap: `src/runtime.zig` test
+"runtime lists the live task vocabulary when linked" hardcoded the
+old ABI/version (`0x200` / `"0.9.3"`); updated to `0x300` /
+`"0.9.5"`. Re-verification of the swap is still open (see below) —
+the new binary has NOT been pushed yet; this section is updated
+once it is green.
+
 ## Phase 5 verification summary (builder, this session)
 
 | Check | Result |

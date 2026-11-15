@@ -11,7 +11,7 @@ const audiocpp = @import("audiocpp.zig");
 
 pub const TaskKind = enum { vad, asr, tts };
 
-/// Audio.cpp task tokens, verified live against the vendored 0.9.3
+/// Audio.cpp task tokens, verified live against the vendored 0.9.5
 /// library (17 tasks: vad asr diar sep gen tts clon vc s2s align vdes
 /// spk svc midi turn wake cls).
 pub fn taskToken(kind: TaskKind) []const u8 {
@@ -304,8 +304,8 @@ test "runtime lists the live task vocabulary when linked" {
         try std.testing.expectEqualStrings("vad", rt.taskName(0).?);
         try std.testing.expectEqualStrings("asr", rt.taskName(1).?);
         try std.testing.expectEqualStrings("tts", rt.taskName(5).?);
-        try std.testing.expect(rt.abiVersion() == 0x200);
-        try std.testing.expectEqualStrings("0.9.3", rt.buildVersion());
+        try std.testing.expect(rt.abiVersion() == 0x300);
+        try std.testing.expectEqualStrings("0.9.5", rt.buildVersion());
     } else {
         try std.testing.expectEqual(@as(usize, 0), rt.taskCount());
     }
