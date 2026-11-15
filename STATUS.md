@@ -47,9 +47,12 @@ tasks, 148 families)** — 148 families, up from 133 in 0.9.3.
 One code change came with the swap: `src/runtime.zig` test
 "runtime lists the live task vocabulary when linked" hardcoded the
 old ABI/version (`0x200` / `"0.9.3"`); updated to `0x300` /
-`"0.9.5"`. Re-verification of the swap is still open (see below) —
-the new binary has NOT been pushed yet; this section is updated
-once it is green.
+`"0.9.5"`. Re-verified by D from a clean worktree of the landed
+commit (`de8f614`): `zig build` exit 0, test binary direct = **All
+126 tests passed**, doctor shows abi 0x300 / build 0.9.5 / 148
+families, and live ASR via the REST server transcribed "Hello, this
+is sandos speaking." (Moonshine, 5,116 ms first call). Pushed —
+origin/main is now the 0.9.5 head.
 
 ## Phase 5 verification summary (builder, this session)
 
