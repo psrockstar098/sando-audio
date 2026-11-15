@@ -10,6 +10,9 @@ const std = @import("std");
 const audiocpp = @import("audiocpp.zig");
 const config = @import("config.zig");
 const engine = @import("engine.zig");
+const runtime = @import("runtime.zig");
+const audio = @import("audio.zig");
+const streaming = @import("streaming.zig");
 
 pub const version_string: [:0]const u8 = "0.1.0";
 
@@ -147,6 +150,231 @@ pub export fn sando_config_validate(path: [*:0]const u8) c_int {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Inference entry points (Phase 2).
+//
+// The engine does NOT load models at create time; these entry points
+// lazy-load exactly the model they need from the engine's config
+// (nothing is downloaded — the file must already exist). Returned
+// strings are owned by the caller; free them with sando_free_string.
+// A streaming session borrows the engine — destroy the stream before
+// the engine.
+// ---------------------------------------------------------------------------
+
+fn parseTaskKind(s: []const u8) ?runtime.TaskKind {
+    if (std.mem.eql(u8, s, "asr")) return .asr;
+    if (std.mem.eql(u8, s, "tts")) return .tts;
+    if (std.mem.eql(u8, s, "vad")) return .vad;
+    return null;
+}
+
+/// Load `name` from the engine's config when it is not loaded yet.
+fn ensureModelLoaded(e: *CEngine, name: []const u8) !void {
+    if (e.eng.rt.model(name) != null) return;
+    const entry = e.eng.cfg.findModel(name) orelse return error.ModelNotInConfig;
+    try e.eng.loadModel(entry.name, entry.kind, entry.file);
+}
+
+fn dupeCString(text: []const u8) ?[*:0]const u8 {
+    const alloc = std.heap.c_allocator;
+    const out = alloc.allocSentinel(u8, text.len, 0) catch {
+        setError("OutOfMemory");
+        return null;
+    };
+    @memcpy(out[0..text.len], text);
+    return out.ptr;
+}
+
+/// Free a string returned by sando_engine_infer_text,
+/// sando_stream_push or sando_stream_finish.
+pub export fn sando_free_string(s: ?[*:0]u8) void {
+    const p = s orelse return;
+    std.heap.c_allocator.free(std.mem.span(p));
+}
+
+/// Offline text inference (ASR/VAD): run `model_name` over a WAV
+/// file and return the transcript. NULL on failure.
+pub export fn sando_engine_infer_text(
+    e: *CEngine,
+    model_name: [*:0]const u8,
+    task: [*:0]const u8,
+    wav_path: [*:0]const u8,
+) ?[*:0]const u8 {
+    const alloc = std.heap.c_allocator;
+    const io = e.threaded.io();
+    const task_kind = parseTaskKind(std.mem.span(task)) orelse {
+        setError("UnknownTask");
+        return null;
+    };
+    ensureModelLoaded(e, std.mem.span(model_name)) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    var session = e.eng.createSession(std.mem.span(model_name), task_kind, .offline) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer session.deinit(alloc);
+    var wav = audio.readWavFile(alloc, io, std.mem.span(wav_path)) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer wav.deinit(alloc);
+    const req = runtime.Request{
+        .task = task_kind,
+        .mode = .offline,
+        .audio = wav.samples,
+        .sample_rate = wav.sample_rate,
+        .channels = wav.channels,
+    };
+    var resp = session.run(io, alloc, req) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer resp.deinit();
+    const t = resp.text() catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    return dupeCString(t.text);
+}
+
+/// Offline TTS: synthesize `text` with `model_name` and write a WAV
+/// file to `wav_out_path`. Returns 0 on success, -1 on failure.
+pub export fn sando_engine_infer_tts(
+    e: *CEngine,
+    model_name: [*:0]const u8,
+    text: [*:0]const u8,
+    language: ?[*:0]const u8,
+    wav_out_path: [*:0]const u8,
+) c_int {
+    const alloc = std.heap.c_allocator;
+    const io = e.threaded.io();
+    ensureModelLoaded(e, std.mem.span(model_name)) catch |err| {
+        setErrorFromErr(err);
+        return -1;
+    };
+    var session = e.eng.createSession(std.mem.span(model_name), .tts, .offline) catch |err| {
+        setErrorFromErr(err);
+        return -1;
+    };
+    defer session.deinit(alloc);
+    const req = runtime.Request{
+        .task = .tts,
+        .mode = .offline,
+        .text = std.mem.span(text),
+        .language = if (language) |l| std.mem.span(l) else null,
+    };
+    var resp = session.run(io, alloc, req) catch |err| {
+        setErrorFromErr(err);
+        return -1;
+    };
+    defer resp.deinit();
+    const a = resp.audio() catch |err| {
+        setErrorFromErr(err);
+        return -1;
+    };
+    audio.writeWavFile(io, std.mem.span(wav_out_path), a.samples, a.sample_rate, a.channels, .pcm16) catch |err| {
+        setErrorFromErr(err);
+        return -1;
+    };
+    return 0;
+}
+
+/// A streaming inference session. Borrows the engine — destroy the
+/// stream before the engine.
+const CStream = struct {
+    eng: *CEngine,
+    session: runtime.Session,
+    pushed_samples: i64 = 0,
+};
+
+/// Create a streaming session for `model_name` + `task`
+/// ("asr", "tts" or "vad"). NULL on failure.
+pub export fn sando_stream_create(
+    e: *CEngine,
+    model_name: [*:0]const u8,
+    task: [*:0]const u8,
+) ?*CStream {
+    const alloc = std.heap.c_allocator;
+    const task_kind = parseTaskKind(std.mem.span(task)) orelse {
+        setError("UnknownTask");
+        return null;
+    };
+    ensureModelLoaded(e, std.mem.span(model_name)) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    var session = e.eng.createSession(std.mem.span(model_name), task_kind, .streaming) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    errdefer session.deinit(alloc);
+    // Open the stream (no seed request).
+    session.streamStart(alloc, null) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    const out = alloc.create(CStream) catch {
+        setError("OutOfMemory");
+        return null;
+    };
+    out.* = .{ .eng = e, .session = session };
+    return out;
+}
+
+pub export fn sando_stream_destroy(s: ?*CStream) void {
+    const stream = s orelse return;
+    stream.session.deinit(std.heap.c_allocator);
+    std.heap.c_allocator.destroy(stream);
+}
+
+/// Push one audio chunk (interleaved float PCM, `frames` per
+/// channel). Returns the newest partial text the backend produced
+/// for this chunk, or NULL when no event carried text. Owned by the
+/// caller — free with sando_free_string.
+pub export fn sando_stream_push(
+    s: *CStream,
+    samples: [*]const f32,
+    frames: usize,
+    sample_rate: u32,
+    channels: u8,
+) ?[*:0]const u8 {
+    const alloc = std.heap.c_allocator;
+    var pump = streaming.StreamPump{ .session = &s.session };
+    const events = pump.push(alloc, samples[0 .. frames * @as(usize, channels)], sample_rate, channels, s.pushed_samples) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer {
+        for (events) |*ev| ev.deinit(alloc);
+        alloc.free(events);
+    }
+    s.pushed_samples += @intCast(frames);
+    // Newest event carrying text wins.
+    var i = events.len;
+    while (i > 0) {
+        i -= 1;
+        if (events[i].text) |t| return dupeCString(t);
+    }
+    return null;
+}
+
+/// Finish the stream and return the final text. Owned by the caller
+/// — free with sando_free_string. NULL on failure.
+pub export fn sando_stream_finish(s: *CStream) ?[*:0]const u8 {
+    var resp = s.session.streamFinish() catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer resp.deinit();
+    const t = resp.text() catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    return dupeCString(t.text);
+}
+
 test "c api create and destroy with a real config" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -196,4 +424,48 @@ test "c api create fails honestly without a config file" {
     try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
     try std.testing.expectEqualStrings("0.1.0", std.mem.span(sando_version()));
     try std.testing.expectEqual(@as(c_int, -1), sando_config_validate("config/does-not-exist.toml"));
+}
+
+test "c api inference fails honestly without a model in the config" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg_text =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "cpu"
+        \\
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "sando.toml", .data = cfg_text });
+    const rel = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/sando.toml", .{tmp.sub_path});
+    defer alloc.free(rel);
+    const rel_buf = try alloc.allocSentinel(u8, rel.len, 0);
+    defer alloc.free(rel_buf);
+    @memcpy(rel_buf[0..rel.len], rel);
+    const rel_z = rel_buf[0..rel.len :0];
+
+    const e = sando_engine_create(rel_z.ptr) orelse {
+        std.debug.print("create failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.EngineCreateFailed;
+    };
+    defer sando_engine_destroy(e);
+
+    // No models in the config at all: every inference entry point
+    // fails cleanly instead of crashing.
+    const wav_z: [:0]const u8 = "does-not-exist.wav";
+    const ghost: [:0]const u8 = "ghost-model";
+    const asr: [:0]const u8 = "asr";
+    try std.testing.expect(sando_engine_infer_text(e, ghost.ptr, asr.ptr, wav_z.ptr) == null);
+    try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
+    const tts_text: [:0]const u8 = "hello";
+    try std.testing.expectEqual(@as(c_int, -1), sando_engine_infer_tts(e, ghost.ptr, tts_text.ptr, null, "out.wav"));
+    try std.testing.expect(sando_stream_create(e, ghost.ptr, asr.ptr) == null);
+    const bad_task: [:0]const u8 = "telepathy";
+    try std.testing.expect(sando_stream_create(e, ghost.ptr, bad_task.ptr) == null);
+    // Freeing NULL is a no-op.
+    sando_free_string(null);
 }
