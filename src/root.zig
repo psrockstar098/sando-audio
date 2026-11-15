@@ -26,8 +26,8 @@ pub const reflex = @import("reflex.zig");
 pub const brain = @import("brain.zig");
 pub const conversation = @import("conversation.zig");
 
-pub const version = "0.2.0";
-pub const version_string = "sando-audio 0.2.0 (Phase 2: Real-Time Speech & Voice Intelligence)";
+pub const version = "0.3.0";
+pub const version_string = "sando-audio 0.3.0 (Phase 3: Intelligence & Conversational AI)";
 
 test {
     // Zig 0.17 only collects test blocks from files referenced inside a

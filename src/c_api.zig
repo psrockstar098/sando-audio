@@ -13,8 +13,10 @@ const engine = @import("engine.zig");
 const runtime = @import("runtime.zig");
 const audio = @import("audio.zig");
 const streaming = @import("streaming.zig");
+const brain = @import("brain.zig");
+const conversation = @import("conversation.zig");
 
-pub const version_string: [:0]const u8 = "0.1.0";
+pub const version_string: [:0]const u8 = "0.3.0";
 
 const CEngine = struct {
     threaded: std.Io.Threaded,
@@ -375,6 +377,160 @@ pub export fn sando_stream_finish(s: *CStream) ?[*:0]const u8 {
     return dupeCString(t.text);
 }
 
+// ---------------------------------------------------------------------------
+// Conversation entry points (Phase 3).
+//
+// A conversation is one session (bounded history, in-memory only)
+// plus a brain. Two brains are exposed: the scripted mock brain
+// (no network, no keys) and an agent brain driven by a host C
+// callback. `ask` is text in, reply text out; no ASR/TTS session is
+// attached here, so the TTS leg reports skipped — the CLI
+// `converse` command is where the full audio pipeline lives. A
+// conversation borrows the engine's Io: destroy it before the
+// engine. Returned strings are owned by the caller; free them with
+// sando_free_string.
+// ---------------------------------------------------------------------------
+
+/// Host brain callback: answer `prompt` (NUL-terminated) and return
+/// a NUL-terminated reply, or NULL on failure. The library copies
+/// the reply, so the host keeps ownership of its string.
+pub const AgentReplyFn = *const fn (ctx: ?*anyopaque, prompt: [*:0]const u8) callconv(.c) ?[*:0]const u8;
+
+const AgentHolder = struct {
+    ctx: ?*anyopaque,
+    cb: AgentReplyFn,
+};
+
+/// Adapt the C callback to the Zig AgentCallback: the whole reply
+/// arrives as one chunk, then the owned reply is returned.
+fn agentReplyAdapter(
+    ctx: *anyopaque,
+    alloc: std.mem.Allocator,
+    prompt: []const u8,
+    chunk_ctx: *anyopaque,
+    on_chunk: brain.ChunkFn,
+) anyerror![]const u8 {
+    const holder: *AgentHolder = @ptrCast(@alignCast(ctx));
+    const prompt_z = try alloc.allocSentinel(u8, prompt.len, 0);
+    defer alloc.free(prompt_z);
+    @memcpy(prompt_z[0..prompt.len], prompt);
+    const reply_z = holder.cb(holder.ctx, prompt_z.ptr) orelse return error.AgentReplyFailed;
+    const reply = std.mem.span(reply_z);
+    try on_chunk(chunk_ctx, reply);
+    return try alloc.dupe(u8, reply);
+}
+
+const CConversation = struct {
+    eng: *CEngine,
+    conv: conversation.Conversation,
+    mock: brain.MockBrain = .{},
+    agent_holder: AgentHolder = undefined,
+    agent_brain: brain.AgentBrain = undefined,
+};
+
+fn conversationCreate(
+    e: ?*CEngine,
+    voice: ?[*:0]const u8,
+    language: ?[*:0]const u8,
+    agent: ?AgentHolder,
+) ?*CConversation {
+    const eng = e orelse {
+        setError("NullEngine");
+        return null;
+    };
+    const alloc = std.heap.c_allocator;
+    const io = eng.threaded.io();
+    const out = alloc.create(CConversation) catch {
+        setError("OutOfMemory");
+        return null;
+    };
+    // Heap-stable before the conversation borrows the brain fields.
+    out.* = .{
+        .eng = eng,
+        .conv = undefined,
+        .mock = .{},
+        .agent_holder = undefined,
+        .agent_brain = undefined,
+    };
+    errdefer alloc.destroy(out);
+    const v = if (voice) |p| std.mem.span(p) else "v1";
+    const l = if (language) |p| std.mem.span(p) else "en";
+    if (agent) |a| {
+        out.agent_holder = a;
+        out.agent_brain = .{ .ctx = &out.agent_holder, .callback = agentReplyAdapter };
+        out.conv = conversation.Conversation.init(alloc, io, out.agent_brain.asBrain(), v, l) catch |err| {
+            setErrorFromErr(err);
+            return null;
+        };
+    } else {
+        out.conv = conversation.Conversation.init(alloc, io, out.mock.asBrain(), v, l) catch |err| {
+            setErrorFromErr(err);
+            return null;
+        };
+    }
+    return out;
+}
+
+/// Create a conversation with the scripted mock brain (no network,
+/// no keys). `voice`/`language` may be NULL for the defaults
+/// ("v1"/"en"). NULL on failure — see sando_last_error(). Destroy
+/// with sando_conversation_destroy().
+pub export fn sando_conversation_create_mock(
+    e: ?*CEngine,
+    voice: ?[*:0]const u8,
+    language: ?[*:0]const u8,
+) ?*CConversation {
+    return conversationCreate(e, voice, language, null);
+}
+
+/// Create a conversation whose brain is a host callback (`cb`).
+/// `ctx` is passed through to every call. `cb` must not be NULL.
+/// `voice`/`language` may be NULL for the defaults. NULL on
+/// failure — see sando_last_error(). Destroy with
+/// sando_conversation_destroy().
+pub export fn sando_conversation_create_agent(
+    e: ?*CEngine,
+    ctx: ?*anyopaque,
+    cb: ?AgentReplyFn,
+    voice: ?[*:0]const u8,
+    language: ?[*:0]const u8,
+) ?*CConversation {
+    const callback = cb orelse {
+        setError("NullAgentCallback");
+        return null;
+    };
+    return conversationCreate(e, voice, language, .{ .ctx = ctx, .cb = callback });
+}
+
+/// Ask one text turn and return the reply. Owned by the caller —
+/// free with sando_free_string. NULL on failure.
+pub export fn sando_conversation_ask(c: ?*CConversation, text: [*:0]const u8) ?[*:0]const u8 {
+    const conv = c orelse {
+        setError("NullConversation");
+        return null;
+    };
+    const alloc = std.heap.c_allocator;
+    var result = conv.conv.processText(std.mem.span(text)) catch |err| {
+        setErrorFromErr(err);
+        return null;
+    };
+    defer result.deinit(alloc);
+    return dupeCString(result.reply);
+}
+
+/// Number of turns in the session history (2 per ask: user +
+/// assistant). 0 for a NULL conversation.
+pub export fn sando_conversation_history_count(c: ?*CConversation) usize {
+    const conv = c orelse return 0;
+    return conv.conv.session.history.items.len;
+}
+
+pub export fn sando_conversation_destroy(c: ?*CConversation) void {
+    const conv = c orelse return;
+    conv.conv.deinit();
+    std.heap.c_allocator.destroy(conv);
+}
+
 test "c api create and destroy with a real config" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -422,7 +578,7 @@ test "c api create fails honestly without a config file" {
     const e = sando_engine_create("config/does-not-exist.toml");
     try std.testing.expect(e == null);
     try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
-    try std.testing.expectEqualStrings("0.1.0", std.mem.span(sando_version()));
+    try std.testing.expectEqualStrings("0.3.0", std.mem.span(sando_version()));
     try std.testing.expectEqual(@as(c_int, -1), sando_config_validate("config/does-not-exist.toml"));
 }
 
@@ -468,4 +624,144 @@ test "c api inference fails honestly without a model in the config" {
     try std.testing.expect(sando_stream_create(e, ghost.ptr, bad_task.ptr) == null);
     // Freeing NULL is a no-op.
     sando_free_string(null);
+}
+
+fn testAgentReply(ctx: ?*anyopaque, prompt: [*:0]const u8) callconv(.c) ?[*:0]const u8 {
+    _ = ctx;
+    _ = prompt;
+    return "agent says hi";
+}
+
+test "c api conversation mock asks and remembers history" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg_text =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "cpu"
+        \\
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "sando.toml", .data = cfg_text });
+    const rel = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/sando.toml", .{tmp.sub_path});
+    defer alloc.free(rel);
+    const rel_buf = try alloc.allocSentinel(u8, rel.len, 0);
+    defer alloc.free(rel_buf);
+    @memcpy(rel_buf[0..rel.len], rel);
+    const rel_z = rel_buf[0..rel.len :0];
+
+    const e = sando_engine_create(rel_z.ptr) orelse {
+        std.debug.print("create failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.EngineCreateFailed;
+    };
+    defer sando_engine_destroy(e);
+
+    const voice: [:0]const u8 = "v1";
+    const lang: [:0]const u8 = "en";
+    const c = sando_conversation_create_mock(e, voice.ptr, lang.ptr) orelse {
+        std.debug.print("conversation create failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.ConversationCreateFailed;
+    };
+    defer sando_conversation_destroy(c);
+    try std.testing.expectEqual(@as(usize, 0), sando_conversation_history_count(c));
+
+    const hello: [:0]const u8 = "hello there";
+    const reply = sando_conversation_ask(c, hello.ptr) orelse {
+        std.debug.print("ask failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.ConversationAskFailed;
+    };
+    defer sando_free_string(@constCast(reply));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply), "Hello") != null);
+    // One ask = one user turn + one assistant turn in history.
+    try std.testing.expectEqual(@as(usize, 2), sando_conversation_history_count(c));
+
+    // A second ask keeps growing history; NULL inputs fail cleanly.
+    const thanks: [:0]const u8 = "thank you";
+    const reply2 = sando_conversation_ask(c, thanks.ptr) orelse return error.ConversationAskFailed;
+    defer sando_free_string(@constCast(reply2));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply2), "welcome") != null);
+    try std.testing.expectEqual(@as(usize, 4), sando_conversation_history_count(c));
+    try std.testing.expect(sando_conversation_ask(null, hello.ptr) == null);
+    try std.testing.expectEqual(@as(usize, 0), sando_conversation_history_count(null));
+    sando_conversation_destroy(null);
+}
+
+test "c api conversation agent callback answers" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg_text =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "cpu"
+        \\
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "sando.toml", .data = cfg_text });
+    const rel = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/sando.toml", .{tmp.sub_path});
+    defer alloc.free(rel);
+    const rel_buf = try alloc.allocSentinel(u8, rel.len, 0);
+    defer alloc.free(rel_buf);
+    @memcpy(rel_buf[0..rel.len], rel);
+    const rel_z = rel_buf[0..rel.len :0];
+
+    const e = sando_engine_create(rel_z.ptr) orelse {
+        std.debug.print("create failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.EngineCreateFailed;
+    };
+    defer sando_engine_destroy(e);
+
+    // NULL voice/language fall back to the defaults.
+    const c = sando_conversation_create_agent(e, null, testAgentReply, null, null) orelse {
+        std.debug.print("conversation create failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.ConversationCreateFailed;
+    };
+    defer sando_conversation_destroy(c);
+    const q: [:0]const u8 = "what is the time?";
+    const reply = sando_conversation_ask(c, q.ptr) orelse {
+        std.debug.print("ask failed: {s}\n", .{std.mem.span(sando_last_error())});
+        return error.ConversationAskFailed;
+    };
+    defer sando_free_string(@constCast(reply));
+    try std.testing.expectEqualStrings("agent says hi", std.mem.span(reply));
+    try std.testing.expectEqual(@as(usize, 2), sando_conversation_history_count(c));
+}
+
+test "c api conversation create fails honestly" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    try std.testing.expect(sando_conversation_create_mock(null, null, null) == null);
+    try std.testing.expect(sando_conversation_create_agent(null, null, testAgentReply, null, null) == null);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg_text =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "cpu"
+        \\
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "sando.toml", .data = cfg_text });
+    const rel = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/sando.toml", .{tmp.sub_path});
+    defer alloc.free(rel);
+    const rel_buf = try alloc.allocSentinel(u8, rel.len, 0);
+    defer alloc.free(rel_buf);
+    @memcpy(rel_buf[0..rel.len], rel);
+    const rel_z = rel_buf[0..rel.len :0];
+    const e = sando_engine_create(rel_z.ptr) orelse return error.EngineCreateFailed;
+    defer sando_engine_destroy(e);
+
+    // A NULL agent callback is a creation failure, not a crash.
+    try std.testing.expect(sando_conversation_create_agent(e, null, null, null, null) == null);
+    try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
 }
