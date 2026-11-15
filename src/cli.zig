@@ -8,6 +8,9 @@
 //!                   [--wav in.wav] [--out out.wav]
 //!   sando-audio bench [--config path] [--model name] [--task asr|tts]
 //!                     [--iterations n] [--text "..."]
+//!   sando-audio converse [--config path] [--wav turn.wav ...] [--interrupt in.wav]
+//!                     [--brain mock|http] [--brain-url url] [--brain-model name]
+//!                     [--voice name] [--language en] [--cache] [--out-dir dir]
 //!   sando-audio models list [--config path]
 //!   sando-audio plugins list [--dir path]
 //!   sando-audio plugins load <path>
@@ -30,9 +33,12 @@ const vad = @import("vad.zig");
 const voicedna = @import("voicedna.zig");
 const cache = @import("cache.zig");
 const audiosense = @import("audiosense.zig");
+const brain = @import("brain.zig");
+const conversation = @import("conversation.zig");
+const models = @import("models.zig");
 
 pub const usage =
-    \\sando-audio 0.2.0 — SANDO Audio, Phase 2 (Real-Time Speech & Voice Intelligence)
+    \\sando-audio 0.3.0 — SANDO Audio, Phase 3 (Intelligence & Conversational AI)
     \\
     \\Usage:
     \\  sando-audio version
@@ -43,6 +49,9 @@ pub const usage =
     \\                  [--wav in.wav] [--out out.wav] [--cache] [--voice name]
     \\  sando-audio stream [--config path] [--model name] [--wav in.wav] [--cache]
     \\  sando-audio vad [--config path] [--model name] [--wav in.wav]
+    \\  sando-audio converse [--config path] [--wav turn.wav ...] [--interrupt in.wav]
+    \\                   [--brain mock|http] [--brain-url url] [--brain-model name]
+    \\                   [--voice name] [--language en] [--cache] [--out-dir dir]
     \\  sando-audio voices list
     \\  sando-audio voices enroll-synthetic <id> <name> [--language en]
     \\  sando-audio voices delete <id>
@@ -98,6 +107,29 @@ pub const BenchOpts = struct {
     text: ?[]const u8 = null,
 };
 
+/// Which brain answers a `converse` turn. `mock` is the scripted
+/// local brain; `http` posts to an OpenAI-compatible endpoint
+/// (local/unauthenticated only — no Authorization header is sent,
+/// so no key is ever needed or used).
+pub const ConverseBrain = enum { mock, http };
+
+pub const ConverseOpts = struct {
+    config_path: []const u8 = engine.default_config_path,
+    /// One turn file per entry, in order. Repeatable --wav.
+    wavs: []const []const u8 = &.{},
+    /// Spoken interruption: transcribed on the first poll during a
+    /// reply (barge-in). If never consumed, runs as a final turn.
+    interrupt_wav: ?[]const u8 = null,
+    brain: ConverseBrain = .mock,
+    brain_url: []const u8 = "http://127.0.0.1:11434/v1/chat/completions",
+    brain_model: []const u8 = "local",
+    voice: []const u8 = "v1",
+    language: []const u8 = "en",
+    cache: bool = false,
+    /// Where spoken TTS audio is written (turn<N>-sent<M>.wav).
+    out_dir: []const u8 = "converse-out",
+};
+
 pub const Command = union(enum) {
     version,
     doctor,
@@ -106,6 +138,7 @@ pub const Command = union(enum) {
     run: RunOpts,
     stream: StreamOpts,
     vad: VadOpts,
+    converse: ConverseOpts,
     voices: VoicesOpts,
     bench: BenchOpts,
     models_list: struct { config_path: []const u8 },
@@ -116,8 +149,9 @@ pub const Command = union(enum) {
 
 pub const ParseError = error{ Usage, OutOfMemory };
 
-/// Parse argv (without argv[0]) into a Command. Pure — no I/O.
-pub fn parseArgs(args: []const []const u8) ParseError!Command {
+/// Parse argv (without argv[0]) into a Command. Pure — no I/O, but
+/// takes an allocator for the repeatable --wav list of `converse`.
+pub fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.Usage;
     const cmd = args[0];
     if (std.mem.eql(u8, cmd, "version")) return .version;
@@ -247,6 +281,50 @@ pub fn parseArgs(args: []const []const u8) ParseError!Command {
         return .{ .vad = opts };
     }
 
+    if (std.mem.eql(u8, cmd, "converse")) {
+        var opts = ConverseOpts{};
+        var wavs = std.ArrayList([]const u8).empty;
+        errdefer wavs.deinit(alloc); // error paths (bad --brain, etc.) must not leak the list
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (i + 1 < args.len and std.mem.eql(u8, a, "--config")) {
+                opts.config_path = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--wav")) {
+                try wavs.append(alloc, args[i + 1]);
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--interrupt")) {
+                opts.interrupt_wav = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--brain")) {
+                const b = args[i + 1];
+                if (std.mem.eql(u8, b, "mock")) opts.brain = .mock else if (std.mem.eql(u8, b, "http")) opts.brain = .http else return error.Usage;
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--brain-url")) {
+                opts.brain_url = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--brain-model")) {
+                opts.brain_model = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--voice")) {
+                opts.voice = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--language")) {
+                opts.language = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--cache")) {
+                opts.cache = true;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--out-dir")) {
+                opts.out_dir = args[i + 1];
+                i += 1;
+            } else return error.Usage;
+        }
+        if (wavs.items.len == 0) return error.Usage;
+        opts.wavs = try wavs.toOwnedSlice(alloc);
+        return .{ .converse = opts };
+    }
+
     if (std.mem.eql(u8, cmd, "voices")) {
         if (args.len >= 2 and std.mem.eql(u8, args[1], "list")) {
             if (args.len != 2) return error.Usage;
@@ -310,7 +388,7 @@ pub fn run(init: std.process.Init) u8 {
     _ = it.next(); // argv[0]
     while (it.next()) |arg| argv.append(alloc, arg) catch return 1;
 
-    const cmd = parseArgs(argv.items) catch {
+    const cmd = parseArgs(alloc, argv.items) catch {
         std.debug.print("{s}", .{usage});
         return 2;
     };
@@ -440,6 +518,7 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
         .run => |opts| return cmdRun(alloc, io, out, opts),
         .stream => |opts| return cmdStream(alloc, io, out, opts),
         .vad => |opts| return cmdVad(alloc, io, out, opts),
+        .converse => |opts| return cmdConverse(alloc, io, out, opts),
         .voices => |opts| return cmdVoices(alloc, io, out, opts),
         .bench => |opts| return cmdBench(alloc, io, out, opts),
     }
@@ -785,6 +864,334 @@ fn cmdVad(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VadOp
     return 0;
 }
 
+/// Free memory (bytes) from /proc/meminfo, or null when unreadable
+/// (non-Linux, or /proc not mounted). The TTS size guard uses it.
+fn memAvailableBytes(alloc: std.mem.Allocator, io: std.Io) ?u64 {
+    var file = std.Io.Dir.openFileAbsolute(io, "/proc/meminfo", .{}) catch return null;
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    const text = reader.interface.readAllocShort(alloc, 1 << 20) catch return null;
+    defer alloc.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "MemAvailable:")) {
+            const rest = std.mem.trim(u8, line["MemAvailable:".len..], " \t");
+            var it = std.mem.tokenizeScalar(u8, rest, ' ');
+            const num = it.next() orelse return null;
+            const kb = std.fmt.parseInt(u64, num, 10) catch return null;
+            return kb * 1024;
+        }
+    }
+    return null;
+}
+
+/// Load the TTS model only when it fits in free memory. Returns null
+/// (with a plain message) when there is no room — the TTS leg is
+/// then skipped honestly instead of OOMing the machine.
+fn loadTtsIfFits(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    eng: *engine.Engine,
+    tts_model: *const config.ModelEntry,
+) !?runtime.Session {
+    const size = models.fileSize(io, tts_model.file) catch 0;
+    if (memAvailableBytes(alloc, io)) |free| {
+        if (size > free) {
+            try out.print("tts skipped: model {s} is {d} MB but only {d} MB is free — this machine cannot load it\n", .{ tts_model.name, size >> 20, free >> 20 });
+            return null;
+        }
+    } else {
+        try out.print("tts: /proc/meminfo unavailable, loading without a size guard\n", .{});
+    }
+    eng.loadModelsForTask(.tts) catch |err| {
+        std.debug.print("cannot load tts model {s} ({t}) — tts leg skipped\n", .{ eng.last_error_model orelse "?", err });
+        return null;
+    };
+    return eng.createSession(tts_model.name, .tts, .offline) catch |err| {
+        std.debug.print("cannot create tts session for {s} ({t}) — tts leg skipped\n", .{ tts_model.name, err });
+        return null;
+    };
+}
+
+/// The spoken interruption for a `converse` run. The first poll
+/// transcribes the interrupt WAV through the ASR session; later
+/// polls return null. `delivered` tells the caller whether the
+/// interruption actually fired, so an unconsumed one can run as a
+/// final normal turn instead.
+const InterruptCtx = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    samples: []const f32,
+    sample_rate: u32,
+    channels: u8,
+    language: []const u8,
+    asr: ?*runtime.Session = null,
+    polled: bool = false,
+    delivered: bool = false,
+    transcript: ?[]const u8 = null,
+
+    fn deinit(self: *InterruptCtx) void {
+        if (self.transcript) |t| self.alloc.free(t);
+    }
+
+    fn poll(ctx: *anyopaque) ?[]const u8 {
+        const c: *@This() = @ptrCast(@alignCast(ctx));
+        if (c.polled) return null;
+        c.polled = true;
+        const asr = c.asr orelse return null;
+        const req = runtime.Request{
+            .task = .asr,
+            .mode = .offline,
+            .audio = c.samples,
+            .sample_rate = c.sample_rate,
+            .channels = c.channels,
+            .language = c.language,
+        };
+        var resp = asr.run(c.io, c.alloc, req) catch return null;
+        defer resp.deinit();
+        const t = resp.text() catch return null;
+        const text = std.mem.trim(u8, t.text, " \t\n\r");
+        if (text.len == 0) return null;
+        c.transcript = c.alloc.dupe(u8, text) catch return null;
+        c.delivered = true;
+        return c.transcript.?;
+    }
+};
+
+/// Writes spoken TTS audio to `<out-dir>/turn<N>-sent<M>.wav`.
+/// An error here is recorded by the conversation (tts_out_errors),
+/// never fatal to the turn.
+const TtsOutCtx = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    out_dir: []const u8,
+    turn: u32 = 0,
+    sentence: u32 = 0,
+
+    fn write(ctx: *anyopaque, sentence_text: []const u8, samples: []const f32, sample_rate: u32, channels: u8) anyerror!void {
+        const c: *@This() = @ptrCast(@alignCast(ctx));
+        _ = sentence_text;
+        std.Io.Dir.cwd().createDirPath(c.io, c.out_dir) catch {};
+        const path = try std.fmt.allocPrint(c.alloc, "{s}/turn{d}-sent{d}.wav", .{ c.out_dir, c.turn, c.sentence });
+        defer c.alloc.free(path);
+        try audio.writeWavFile(c.io, path, samples, sample_rate, channels, .pcm16);
+        c.sentence += 1;
+    }
+};
+
+/// One turn of a conversation: prints the "Sando: " prefix, then
+/// the brain's reply streams live through the echo while
+/// `processAudio` runs, then the transcript and leg summary.
+fn runConverseTurn(
+    alloc: std.mem.Allocator,
+    out: *std.Io.Writer,
+    conv: *conversation.Conversation,
+    tts_ctx: *TtsOutCtx,
+    samples: []const f32,
+    sample_rate: u32,
+    channels: u8,
+    turn_no: usize,
+) !void {
+    tts_ctx.turn = @intCast(turn_no);
+    tts_ctx.sentence = 0;
+    try out.print("--- turn {d} ---\nSando: ", .{turn_no});
+    try out.flush();
+    var result = try conv.processAudio(samples, sample_rate, channels);
+    defer result.deinit(alloc);
+    try out.print("\n  you said: \"{s}\"\n", .{result.transcript});
+    if (result.partial_reply) |p| try out.print("  reply cut short at: \"{s}\"\n", .{p});
+    if (result.interrupt_text) |t| try out.print("  interrupted by: \"{s}\"\n", .{t});
+    try out.print("  legs: asr={s} brain={s} tts={s} (spoken {d}, cached {d}, skipped {d}, tts errors {d})\n", .{
+        @tagName(result.asr),
+        @tagName(result.brain),
+        @tagName(result.tts),
+        result.sentences_spoken,
+        result.sentences_from_cache,
+        result.sentences_skipped,
+        result.tts_out_errors,
+    });
+    try out.print("  barge-in: {s}\n", .{if (result.barged_in) "yes" else "no"});
+    try out.flush();
+}
+
+/// Speech-to-brain-to-speech over WAV files: each --wav is VAD
+/// segmented (energy fallback, labelled), segments are grouped into
+/// turns on silence gaps via the ReflexEngine turn-end probability,
+/// and each turn runs ASR -> brain -> TTS through `Conversation`.
+/// The brain streams live; TTS audio lands in --out-dir. With
+/// --cache, repeat ASR/TTS legs are served from the SmartCache.
+fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: ConverseOpts) !u8 {
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    defer eng.deinit();
+
+    // ASR is the input leg: without it there is nothing to converse
+    // about, so a failure here is fatal (unlike TTS below).
+    eng.loadModelsForTask(.asr) catch |err| {
+        std.debug.print("cannot load asr model {s} ({t})\n", .{ eng.last_error_model orelse "?", err });
+        return 1;
+    };
+    const asr_model = pickModel(&eng.cfg, null, .asr) orelse {
+        std.debug.print("no asr model in {s}\n", .{opts.config_path});
+        return 1;
+    };
+    var asr_session = eng.createSession(asr_model.name, .asr, .offline) catch |err| {
+        std.debug.print("cannot create asr session for {s} ({t})\n", .{ asr_model.name, err });
+        return 1;
+    };
+    defer asr_session.deinit(alloc);
+
+    // TTS is the output leg, but optional: a model too big for this
+    // machine's free RAM is skipped honestly, never loaded.
+    var tts_session: ?runtime.Session = null;
+    defer if (tts_session) |*s| s.deinit(alloc);
+    if (pickModel(&eng.cfg, null, .tts)) |tts_model| {
+        tts_session = try loadTtsIfFits(alloc, io, out, &eng, tts_model);
+    } else {
+        try out.print("tts skipped: no tts model in {s}\n", .{opts.config_path});
+    }
+
+    var mock = brain.MockBrain{};
+    var http_sender = brain.StdHttpSender{};
+    var http_brain = brain.HttpBrain.init(opts.brain_url, opts.brain_model, http_sender.asSender());
+    const brain_value: brain.Brain = switch (opts.brain) {
+        .mock => mock.asBrain(),
+        .http => http_brain.asBrain(),
+    };
+    if (opts.brain == .http) {
+        try out.print("brain: http {s} model {s} (local/unauthenticated only, no key)\n", .{ opts.brain_url, opts.brain_model });
+    }
+
+    var smart_cache = cache.SmartCache.init(alloc, 64 << 20);
+    defer smart_cache.deinit();
+
+    var interrupt_wav: ?audio.WavData = null;
+    defer if (interrupt_wav) |*w| w.deinit(alloc);
+    var interrupt_ctx: ?InterruptCtx = null;
+    defer if (interrupt_ctx) |*c| c.deinit();
+    if (opts.interrupt_wav) |path| {
+        const w = audio.readWavFile(alloc, io, path) catch |err| {
+            std.debug.print("cannot read interrupt wav {s} ({t})\n", .{ path, err });
+            return 1;
+        };
+        interrupt_wav = w;
+        interrupt_ctx = InterruptCtx{
+            .alloc = alloc,
+            .io = io,
+            .samples = w.samples,
+            .sample_rate = w.sample_rate,
+            .channels = w.channels,
+            .language = opts.language,
+            .asr = &asr_session,
+        };
+    }
+
+    var conv = conversation.Conversation.init(alloc, io, brain_value, opts.voice, opts.language) catch |err| {
+        std.debug.print("cannot start conversation ({t})\n", .{err});
+        return 1;
+    };
+    defer conv.deinit();
+    conv.asr = &asr_session;
+    if (tts_session) |*s| conv.tts = s;
+    if (opts.cache) conv.cache = &smart_cache;
+    conv.echo = out;
+    if (interrupt_ctx) |*c| {
+        conv.interrupt_fn = InterruptCtx.poll;
+        conv.interrupt_ctx = c;
+    }
+    var tts_ctx = TtsOutCtx{ .alloc = alloc, .io = io, .out_dir = opts.out_dir };
+    conv.on_tts_audio = TtsOutCtx.write;
+    conv.tts_audio_ctx = &tts_ctx;
+
+    var turn_no: usize = 0;
+    for (opts.wavs) |path| {
+        var wav = audio.readWavFile(alloc, io, path) catch |err| {
+            std.debug.print("cannot read {s} ({t})\n", .{ path, err });
+            return 1;
+        };
+        defer wav.deinit(alloc);
+        try out.print("input: {s} ({d} samples @ {d} Hz, {d} ch)\n", .{ path, wav.samples.len, wav.sample_rate, wav.channels });
+
+        var energy = vad.EnergyVad.init(wav.sample_rate);
+        var tracker = vad.VadTracker.init(alloc, wav.sample_rate);
+        defer tracker.deinit();
+        var offset: usize = 0;
+        const chunk_frames = wav.sample_rate / 10; // 100 ms chunks
+        while (offset < wav.samples.len) {
+            const end = @min(offset + chunk_frames * @as(usize, wav.channels), wav.samples.len);
+            if (wav.channels == 1) {
+                if (energy.feed(wav.samples[offset..end])) |act| try tracker.feed(act);
+            } else {
+                var mono = try alloc.alloc(f32, (end - offset) / @as(usize, wav.channels));
+                defer alloc.free(mono);
+                for (0..mono.len) |i| mono[i] = wav.samples[offset + i * @as(usize, wav.channels)];
+                if (energy.feed(mono)) |act| try tracker.feed(act);
+            }
+            offset = end;
+        }
+        try tracker.finish(@intCast(wav.samples.len / @as(usize, wav.channels)));
+        try out.print("vad: energy fallback, {d} speech segment(s)\n", .{tracker.segmentCount()});
+        if (tracker.segmentCount() == 0) {
+            try out.print("no speech detected in {s} — skipped\n", .{path});
+            try out.flush();
+            continue;
+        }
+
+        // Group segments into turns on silence gaps, using the
+        // ReflexEngine turn-end probability (silence-driven here:
+        // there is no partial transcript yet at grouping time).
+        var pending = std.ArrayList(f32).empty;
+        defer pending.deinit(alloc);
+        const segs = tracker.segments.items;
+        for (segs, 0..) |seg, si| {
+            const s0 = @as(usize, @intCast(seg.start_sample)) * @as(usize, wav.channels);
+            const s1 = @as(usize, @intCast(seg.end_sample)) * @as(usize, wav.channels);
+            try pending.appendSlice(alloc, wav.samples[s0..@min(s1, wav.samples.len)]);
+            const is_last = si == segs.len - 1;
+            const silence_ms: u32 = if (is_last) 10_000 else blk: {
+                const gap_frames = segs[si + 1].start_sample - seg.end_sample;
+                break :blk @intCast(@divFloor(gap_frames * 1000, @as(i64, wav.sample_rate)));
+            };
+            const reply_now = is_last or conv.shouldReply(silence_ms, tracker.silence_ms, "", false);
+            if (reply_now) {
+                turn_no += 1;
+                try runConverseTurn(alloc, out, &conv, &tts_ctx, pending.items, wav.sample_rate, wav.channels, turn_no);
+                pending.clearRetainingCapacity();
+            }
+        }
+        if (pending.items.len > 0) {
+            turn_no += 1;
+            try runConverseTurn(alloc, out, &conv, &tts_ctx, pending.items, wav.sample_rate, wav.channels, turn_no);
+            pending.clearRetainingCapacity();
+        }
+    }
+
+    // An interruption that never fired during a reply (e.g. the
+    // reply had no spoken sentences to poll after) still gets heard:
+    // it runs as a final normal turn.
+    if (interrupt_ctx) |*c| {
+        if (!c.delivered) {
+            if (interrupt_wav) |w| {
+                turn_no += 1;
+                try out.print("interrupt was not consumed during a reply — running as a final turn\n", .{});
+                try runConverseTurn(alloc, out, &conv, &tts_ctx, w.samples, w.sample_rate, w.channels, turn_no);
+            }
+        }
+    }
+
+    try out.print("converse done: {d} turn(s), {d} barge-in(s), {d} history turn(s)\n", .{
+        turn_no,
+        conv.stats.barge_ins,
+        conv.session.history.items.len,
+    });
+    try out.flush();
+    return 0;
+}
+
 /// VoiceDNA voice profiles: list, enroll a synthetic voice, delete.
 fn cmdVoices(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VoicesOpts) !u8 {
     const store = voicedna.VoiceStore.init(alloc, io, "voices");
@@ -907,47 +1314,86 @@ fn cmdBench(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: Ben
 }
 
 test "parseArgs accepts the main commands" {
-    const v = try parseArgs(&.{"version"});
+    const alloc = std.testing.allocator;
+    const v = try parseArgs(alloc, &.{"version"});
     try std.testing.expect(v == .version);
-    const d = try parseArgs(&.{"doctor"});
+    const d = try parseArgs(alloc, &.{"doctor"});
     try std.testing.expect(d == .doctor);
-    const cv = try parseArgs(&.{ "config", "validate", "config/sando.toml" });
+    const cv = try parseArgs(alloc, &.{ "config", "validate", "config/sando.toml" });
     try std.testing.expect(std.mem.eql(u8, cv.config_validate.path, "config/sando.toml"));
-    const r = try parseArgs(&.{ "run", "--task", "tts", "--text", "hello", "--mode", "streaming" });
+    const r = try parseArgs(alloc, &.{ "run", "--task", "tts", "--text", "hello", "--mode", "streaming" });
     try std.testing.expect(r.run.task == .tts);
     try std.testing.expect(r.run.mode == .streaming);
     try std.testing.expectEqualStrings("hello", r.run.text.?);
-    const rc = try parseArgs(&.{ "run", "--task", "tts", "--text", "hi", "--cache", "--voice", "v1" });
+    const rc = try parseArgs(alloc, &.{ "run", "--task", "tts", "--text", "hi", "--cache", "--voice", "v1" });
     try std.testing.expect(rc.run.cache);
     try std.testing.expectEqualStrings("v1", rc.run.voice.?);
-    const s = try parseArgs(&.{ "stream", "--wav", "in.wav", "--cache" });
+    const s = try parseArgs(alloc, &.{ "stream", "--wav", "in.wav", "--cache" });
     try std.testing.expectEqualStrings("in.wav", s.stream.wav_in.?);
     try std.testing.expect(s.stream.cache);
-    const vc = try parseArgs(&.{ "vad", "--wav", "in.wav" });
+    const vc = try parseArgs(alloc, &.{ "vad", "--wav", "in.wav" });
     try std.testing.expectEqualStrings("in.wav", vc.vad.wav_in.?);
-    const vl = try parseArgs(&.{ "voices", "list" });
+    const vl = try parseArgs(alloc, &.{ "voices", "list" });
     try std.testing.expect(vl.voices == .list);
-    const ve = try parseArgs(&.{ "voices", "enroll-synthetic", "id1", "My Voice", "--language", "kq" });
+    const ve = try parseArgs(alloc, &.{ "voices", "enroll-synthetic", "id1", "My Voice", "--language", "kq" });
     try std.testing.expectEqualStrings("id1", ve.voices.enroll_synthetic.id);
     try std.testing.expectEqualStrings("kq", ve.voices.enroll_synthetic.language);
-    const vd = try parseArgs(&.{ "voices", "delete", "id1" });
+    const vd = try parseArgs(alloc, &.{ "voices", "delete", "id1" });
     try std.testing.expectEqualStrings("id1", vd.voices.delete.id);
-    const pm = try parseArgs(&.{ "plugins", "load", "--manifest", "examples/plugins/noop/manifest.toml" });
+    const pm = try parseArgs(alloc, &.{ "plugins", "load", "--manifest", "examples/plugins/noop/manifest.toml" });
     try std.testing.expectEqualStrings("examples/plugins/noop/manifest.toml", pm.plugins_load_manifest.path);
-    const b = try parseArgs(&.{ "bench", "--iterations", "50" });
+    const b = try parseArgs(alloc, &.{ "bench", "--iterations", "50" });
     try std.testing.expectEqual(@as(u64, 50), b.bench.iterations);
 }
 
 test "parseArgs rejects bad input" {
-    try std.testing.expectError(error.Usage, parseArgs(&.{}));
-    try std.testing.expectError(error.Usage, parseArgs(&.{"frobnicate"}));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "run", "--task", "telepathy" }));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "bench", "--iterations", "0" }));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "config", "validate" }));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "stream" }));
-    try std.testing.expectError(error.Usage, parseArgs(&.{"vad"}));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "voices", "enroll-synthetic", "only-id" }));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "voices", "delete" }));
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{}));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"frobnicate"}));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "run", "--task", "telepathy" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "bench", "--iterations", "0" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "config", "validate" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "stream" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"vad"}));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "voices", "enroll-synthetic", "only-id" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "voices", "delete" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"converse"}));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "converse", "--wav", "a.wav", "--brain", "telepathy" }));
+}
+
+test "parseArgs accepts converse with repeatable --wav" {
+    const alloc = std.testing.allocator;
+    const c = try parseArgs(alloc, &.{
+        "converse",
+        "--wav",            "a.wav",
+        "--wav",            "b.wav",
+        "--interrupt",      "i.wav",
+        "--brain",          "http",
+        "--brain-url",      "http://127.0.0.1:11434/v1/chat/completions",
+        "--brain-model",    "local",
+        "--voice",          "v1",
+        "--language",       "kq",
+        "--cache",
+        "--out-dir",        "out",
+    });
+    defer alloc.free(c.converse.wavs);
+    try std.testing.expectEqual(@as(usize, 2), c.converse.wavs.len);
+    try std.testing.expectEqualStrings("a.wav", c.converse.wavs[0]);
+    try std.testing.expectEqualStrings("b.wav", c.converse.wavs[1]);
+    try std.testing.expectEqualStrings("i.wav", c.converse.interrupt_wav.?);
+    try std.testing.expect(c.converse.brain == .http);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", c.converse.brain_url);
+    try std.testing.expectEqualStrings("local", c.converse.brain_model);
+    try std.testing.expectEqualStrings("v1", c.converse.voice);
+    try std.testing.expectEqualStrings("kq", c.converse.language);
+    try std.testing.expect(c.converse.cache);
+    try std.testing.expectEqualStrings("out", c.converse.out_dir);
+
+    const defaults = try parseArgs(alloc, &.{ "converse", "--wav", "only.wav" });
+    defer alloc.free(defaults.converse.wavs);
+    try std.testing.expect(defaults.converse.brain == .mock);
+    try std.testing.expect(!defaults.converse.cache);
+    try std.testing.expectEqualStrings("converse-out", defaults.converse.out_dir);
 }
 
 test "listPluginFiles lists .so files in a real directory" {
