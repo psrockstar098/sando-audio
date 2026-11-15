@@ -1,12 +1,23 @@
 # SANDO Audio — Phase 3 STATUS
 
-Phase 3 (Intelligence & Conversational AI): **COMPLETE and
-builder-verified**, 2026-11-15. Built and tested on this VM
-(Intel Xeon Platinum 8321HC, 4 cores, AVX-512, Ubuntu 24.04, glibc 2.39,
-Zig 0.17.1). Local commits only until pushed — origin/main is still the
-Phase 2 head until D verifies independently and pushes.
+Phase 3 (Intelligence & Conversational AI): **COMPLETE, builder-verified
+and VERIFIED INDEPENDENTLY BY D from a clean worktree**, 2026-11-15.
+Built and tested on this VM (Intel Xeon Platinum 8321HC, 4 cores,
+AVX-512, Ubuntu 24.04, glibc 2.39, Zig 0.17.1). Pushed by D after
+verification — origin/main is the Phase 3 head.
 
-## Phase 3 verification summary (builder; D's independent verification pending)
+## Phase 3 verification summary (D, independent, fresh worktree)
+
+D re-ran everything from a clean worktree with a clean cache: `zig build`
+exit 0; test binary direct = **All 91 tests passed, exit 0**; `converse`
+single turn live (exact transcription, mock brain answered,
+`asr=ran brain=ran tts=unavailable`); barge-in live (reply cut at
+"Hello!", interrupt transcribed live, joke delivered, 1 barge-in, 4
+history turns); multi-turn live (2 turns, history 4). One builder claim
+did NOT reproduce: the SmartCache is in-process only, so a repeat
+`converse` run in a fresh process re-runs ASR (`asr=ran`, verified twice
+with the same out-dir) — the cache leg is proven in-process by unit
+test only, not across processes. Corrected in the table below.
 
 | Check | Result |
 |---|---|
@@ -15,7 +26,7 @@ Phase 2 head until D verifies independently and pushes.
 | CLI smoke (`version`, `doctor`) | 0.3.0 Phase 3; doctor correct (audio.cpp 0.9.3, 17 tasks, 133 families) |
 | Live `converse` (Moonshine-Streaming-small, 287 MB, CPU; mock brain) | **PROVEN with real speech**: "Hello, this is Sando speaking." → transcribed exactly, mock brain answered "Hello! I am Sando. Speak to me and I will answer." (~9.5 s for the whole turn, model load included) |
 | Live barge-in (`converse --interrupt`) | **PROVEN**: reply cut short at "Hello!", interrupt transcribed live ("Tell me a joke instead."), follow-up joke delivered, 1 barge-in, 4 history turns |
-| Live multi-turn + cache | 2 turns, history grows to 4; repeat of the same audio reports `asr=cached` (SmartCache leg proven live) |
+| Live multi-turn + cache | 2 turns, history grows to 4; SmartCache is in-process only — a repeat `converse` run in a fresh process re-runs ASR (`asr=ran`, D verified twice with the same out-dir), so the cache leg is proven in-process by unit test, not across processes |
 | Live `--brain http` (local mock HTTP brain on 127.0.0.1:18080) | **PROVEN**: OpenAI-compatible SSE reply streamed through the real `std.http` transport; unconsumed interrupt ran as a final turn, as designed |
 | TTS (Qwen3-TTS-0.6B-Q8_0, 1.9 GB) | **Still not runnable on this VM** — the new size guard refuses the load honestly: "tts skipped: model qwen3-tts-0.6b is 1898 MB but only ~577–1094 MB is free — this machine cannot load it" (free RAM varies run to run) |
 | C API conversation entry points | present: `sando_conversation_create_mock`, `sando_conversation_create_agent`, `sando_conversation_ask`, `sando_conversation_history_count`, `sando_conversation_destroy` (22 exports total) |
