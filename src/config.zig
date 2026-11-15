@@ -38,6 +38,19 @@ pub const ModelEntry = struct {
     kind: ModelKind,
     file: []const u8,
     voice: ?[]const u8 = null,
+    /// Speaker reference clip for TTS families that clone a voice
+    /// from audio. Qwen3-TTS Base cannot speak without one — its
+    /// session throws at the first request when no reference audio
+    /// is attached ("Qwen3 base TTS requires voice clone reference
+    /// audio"). Path to a WAV file, relative to the working
+    /// directory. Best-effort: a missing file leaves the request
+    /// voiceless, exactly as before this field existed.
+    reference_wav: ?[]const u8 = null,
+    /// Transcript of `reference_wav`, word for word. Qwen3-TTS
+    /// Base's in-context-learning mode requires it whenever a
+    /// reference clip is given. Must appear together with
+    /// `reference_wav` (the config rejects one without the other).
+    reference_text: ?[]const u8 = null,
     streaming: bool = false,
     language: ?[]const u8 = null,
     config_id: ?[]const u8 = null,
@@ -241,6 +254,10 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
                     m.file = try a.dupe(u8, try parseString(raw_value));
                 } else if (std.mem.eql(u8, key, "voice")) {
                     m.voice = try a.dupe(u8, try parseString(raw_value));
+                } else if (std.mem.eql(u8, key, "reference_wav")) {
+                    m.reference_wav = try a.dupe(u8, try parseString(raw_value));
+                } else if (std.mem.eql(u8, key, "reference_text")) {
+                    m.reference_text = try a.dupe(u8, try parseString(raw_value));
                 } else if (std.mem.eql(u8, key, "streaming")) {
                     m.streaming = try parseBool(raw_value);
                 } else if (std.mem.eql(u8, key, "language")) {
@@ -281,6 +298,10 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
 
     for (models.items) |m| {
         if (m.name.len == 0 or m.file.len == 0) return error.MissingField;
+        // A reference clip without its transcript (or the reverse)
+        // fails at runtime inside Qwen3-TTS with a bare "Runtime"
+        // error — reject it here with a clear cause instead.
+        if ((m.reference_wav != null) != (m.reference_text != null)) return error.InvalidValue;
     }
     for (models.items, 0..) |m, i| {
         for (models.items, 0..) |other, j| {
@@ -383,8 +404,10 @@ pub const example_config =
     \\[[models]]
     \\name = "qwen3-tts-0.6b"
     \\kind = "tts"
-    \\file = "models/qwen3-tts-0.6b-q8_0.gguf"
+    \\file = "models/qwen3-tts-12hz-0.6b-base-q8_0.gguf"
     \\voice = "liberian-voice-01"
+    \\reference_wav = "assets/voices/demo-voice.wav"
+    \\reference_text = "Hello, this is Sando, your Liberian voice. I can hear you, and I can speak."
     \\streaming = true
     \\language = "en"
     \\
@@ -424,11 +447,35 @@ test "parse example config" {
     try std.testing.expectEqualStrings("qwen3-tts-0.6b", cfg.models[0].name);
     try std.testing.expect(cfg.models[0].kind == .tts);
     try std.testing.expectEqualStrings("liberian-voice-01", cfg.models[0].voice.?);
+    // The example ships the demo reference voice for Qwen3-TTS Base.
+    try std.testing.expectEqualStrings("assets/voices/demo-voice.wav", cfg.models[0].reference_wav.?);
+    try std.testing.expectEqualStrings("Hello, this is Sando, your Liberian voice. I can hear you, and I can speak.", cfg.models[0].reference_text.?);
     try std.testing.expect(cfg.findModel("whisper-small") != null);
     try std.testing.expect(cfg.findModel("nope") == null);
     const tts = try cfg.modelsOfKind(.tts, alloc);
     defer alloc.free(tts);
     try std.testing.expectEqual(@as(usize, 1), tts.len);
+}
+
+test "reference_wav without reference_text is rejected" {
+    const alloc = std.testing.allocator;
+    const bad =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\
+        \\[hardware]
+        \\backend = "auto"
+        \\
+        \\[[models]]
+        \\name = "qwen3-tts-0.6b"
+        \\kind = "tts"
+        \\file = "models/qwen3-tts-12hz-0.6b-base-q8_0.gguf"
+        \\reference_wav = "assets/voices/demo-voice.wav"
+        \\
+    ;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, bad));
 }
 
 test "persona prompt is optional, unknown persona key rejected" {

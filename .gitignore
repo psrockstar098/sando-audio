@@ -2,7 +2,7 @@
 zig-out/
 third-party/
 models/
-voices/
+/voices/
 config/sando.toml
 *.o
 *.a

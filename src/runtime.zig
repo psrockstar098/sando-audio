@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const audiocpp = @import("audiocpp.zig");
+const audio = @import("audio.zig");
 
 pub const TaskKind = enum { vad, asr, tts };
 
@@ -48,10 +49,33 @@ pub const Request = struct {
     /// variant consults a speaker name), so the shipped path is
     /// unchanged.
     voice: ?[]const u8 = null,
+    /// Speaker reference audio for TTS families that clone a voice
+    /// from audio (Qwen3-TTS Base: the model cannot speak without
+    /// one). Loaded samples, owned by the caller — the backend
+    /// copies them into the request. Null = no reference clip.
+    /// `reference_rate`/`reference_channels` describe the samples;
+    /// `reference_text` is the clip's transcript, word for word
+    /// (Qwen3-TTS Base's in-context-learning mode requires it).
+    /// All three are best-effort, like `voice`: a family that takes
+    /// no reference audio ignores them.
+    reference_audio: ?[]const f32 = null,
+    reference_rate: u32 = 24000,
+    reference_channels: u8 = 1,
+    reference_text: ?[]const u8 = null,
     audio: ?[]const f32 = null,
     sample_rate: u32 = 24000,
     channels: u8 = 1,
 };
+
+/// Load a model's speaker reference clip (WAV) for TTS. Best-effort:
+/// returns null when no path is given or the file cannot be read —
+/// the caller then sends the request without a reference clip,
+/// exactly as before this feature existed. The caller owns the
+/// returned WavData and must deinit it.
+pub fn loadReferenceWav(alloc: std.mem.Allocator, io: std.Io, path: ?[]const u8) ?audio.WavData {
+    const p = path orelse return null;
+    return audio.readWavFile(alloc, io, p) catch null;
+}
 
 /// One inference response. Wraps the audio.cpp result; `deinit` frees it.
 /// Text and audio accessors borrow from the result — valid until deinit.
@@ -140,6 +164,11 @@ pub const Session = struct {
             // Best-effort: a family that takes no voice id (or rejects
             // this one) leaves the request voiceless, as before.
             if (req.voice) |v| request.setVoiceId(alloc, v) catch {};
+            // Speaker reference audio: Qwen3-TTS Base cannot speak
+            // without it (its session throws at the first request).
+            // Families that take no reference audio ignore it.
+            if (req.reference_audio) |s| request.setVoiceAudio(s, req.reference_rate, req.reference_channels) catch {};
+            if (req.reference_text) |t| request.setOption(alloc, "reference_text", t) catch {};
         }
         var result = try self.inner.run(&request);
         errdefer result.deinit();
@@ -157,6 +186,8 @@ pub const Session = struct {
             if (r.audio) |a| try request.setAudio(a, r.sample_rate, r.channels);
             if (r.task == .tts) {
                 if (r.voice) |v| request.setVoiceId(alloc, v) catch {};
+                if (r.reference_audio) |s| request.setVoiceAudio(s, r.reference_rate, r.reference_channels) catch {};
+                if (r.reference_text) |t| request.setOption(alloc, "reference_text", t) catch {};
             }
             return self.inner.streamStart(&request);
         }
@@ -344,4 +375,25 @@ test "createSession without a loaded model fails honestly" {
     var rt = try Runtime.init(alloc, std.testing.io);
     defer rt.deinit();
     try std.testing.expectError(error.ModelNotLoaded, rt.createSession("ghost", .tts, .offline, null, 0, 1));
+}
+
+test "loadReferenceWav loads the shipped demo voice" {
+    const alloc = std.testing.allocator;
+    var wav = loadReferenceWav(alloc, std.testing.io, "assets/voices/demo-voice.wav") orelse return error.TestExpectedEqual;
+    defer wav.deinit(alloc);
+    try std.testing.expectEqual(@as(u32, 24000), wav.sample_rate);
+    try std.testing.expectEqual(@as(u8, 1), wav.channels);
+    // A few seconds of real speech, not a blip and not silence.
+    try std.testing.expect(wav.durationSeconds() > 3.0);
+    var nonzero: usize = 0;
+    for (wav.samples) |s| {
+        if (s != 0) nonzero += 1;
+    }
+    try std.testing.expect(nonzero * 2 > wav.samples.len);
+}
+
+test "loadReferenceWav returns null for a missing clip" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(loadReferenceWav(alloc, std.testing.io, "assets/voices/does-not-exist.wav") == null);
+    try std.testing.expect(loadReferenceWav(alloc, std.testing.io, null) == null);
 }

@@ -45,6 +45,34 @@ writing; the audio.cpp source build alone takes ~30–60 min).
 A one-time check is scheduled ~12:55 the same day to report the
 outcome.
 
+CI run for `659aac9` (2026-11-15 ~13:50, run `43719721499`):
+**FAILED at the TTS smoke step — and the failure taught us
+something real.** The full test suite passed (154/154) and the
+doctor check passed, but `run --task tts` died with `error:
+Runtime` 2.3 s after the CPU backend loaded. Root cause, read
+from the audio.cpp 0.9.5 source (`src/models/qwen3_tts/
+session.cpp:776`): **Qwen3-TTS Base requires voice-clone
+reference audio** — the session throws "Qwen3 base TTS requires
+voice clone reference audio" when the first request carries no
+reference clip. The engine sent only text + voice id; voice id
+is read by the CustomVoice variant only, never by Base. Fix
+(2026-11-15 ~14:15): the TTS path now carries a speaker
+reference clip — new `reference_wav` + `reference_text` keys on
+each `[[models]]` entry (both-or-neither, rejected by `config
+validate` otherwise), loaded once per request and attached via
+the C API's `set_voice_audio` + `reference_text` option, in
+`run`, `bench`, REST `/v1/infer?task=tts`, and `converse`. The
+shipped config points at `assets/voices/demo-voice.wav` (24 kHz
+mono, 6.4 s, synthetic demo voice — "Hello, this is Sando, your
+Liberian voice. I can hear you, and I can speak."), so the
+engine speaks out of the box; replace the two lines with your
+own clip + exact transcript to change the voice. `.gitignore`
+narrowed `voices/` → `/voices/` so the demo clip is committable
+while enrolled voices stay ignored. Verified here: build 0,
+**All 157 tests passed**, `config validate` valid, live ASR
+regression green. Qwen3 itself still cannot run on this VM
+(RAM), so the CI run is the live proof — watch the next run.
+
 Scope, per Dominic: the CI run tests JUST THE ENGINE with the
 stock Qwen3-TTS base model. The real voice is the fine-tuned
 Qwen3-TTS-0.6B LoRA, which is not finished yet. Swapping it in

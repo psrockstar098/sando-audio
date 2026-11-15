@@ -60,6 +60,11 @@ pub const Session = struct {
     id: []const u8,
     voice: []const u8,
     language: []const u8,
+    /// Speaker reference clip for the TTS leg (Qwen3-TTS Base needs
+    /// one to speak). Borrowed — set from the TTS model entry after
+    /// init, like `system_prompt`. Null = no reference clip.
+    reference_wav: ?[]const u8 = null,
+    reference_text: ?[]const u8 = null,
     history: std.ArrayList(Turn) = .empty,
     /// System prompt override (borrowed — caller-owned). When null
     /// the default Sando persona (persona.default_persona_prompt)
@@ -474,12 +479,18 @@ pub const Conversation = struct {
             self.turn_skipped += 1;
             return;
         };
+        var ref_wav = runtime.loadReferenceWav(self.alloc, self.io, self.session.reference_wav);
+        defer if (ref_wav) |*w| w.deinit(self.alloc);
         const req = runtime.Request{
             .task = .tts,
             .mode = .offline,
             .text = sentence,
             .language = self.session.language,
             .voice = self.session.voice,
+            .reference_audio = if (ref_wav) |w| w.samples else null,
+            .reference_rate = if (ref_wav) |w| w.sample_rate else 24000,
+            .reference_channels = if (ref_wav) |w| w.channels else 1,
+            .reference_text = self.session.reference_text,
         };
         var resp = try tts.run(self.io, self.alloc, req);
         defer resp.deinit();

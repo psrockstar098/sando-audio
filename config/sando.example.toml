@@ -21,6 +21,17 @@ name = "qwen3-tts-0.6b"
 kind = "tts"             # "tts" | "stt" | "vad"
 file = "models/qwen3-tts-12hz-0.6b-base-q8_0.gguf"
 voice = "liberian-voice-01"
+# Qwen3-TTS Base cannot speak without a speaker reference clip:
+# its session throws at the first request when no reference audio
+# is attached. `reference_wav` is the clip (WAV, any sample rate —
+# the encoder resamples), `reference_text` its transcript, word for
+# word. The shipped clip is a synthetic DEMO voice so the engine
+# speaks out of the box; replace both lines with your own voice to
+# change what Sando sounds like. (The fine-tuned LoRA is the real
+# voice once fine-tuning finishes; the clip is what the base model
+# clones from until then.)
+reference_wav = "assets/voices/demo-voice.wav"
+reference_text = "Hello, this is Sando, your Liberian voice. I can hear you, and I can speak."
 streaming = true
 language = "en"
 

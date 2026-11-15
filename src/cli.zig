@@ -974,12 +974,21 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                 return 1;
             };
             defer session.deinit(alloc);
+            // Speaker reference clip (Qwen3-TTS Base cannot speak
+            // without one). Loaded once per run; a missing file
+            // leaves the request voiceless, as before.
+            var ref_wav = runtime.loadReferenceWav(alloc, io, model.reference_wav);
+            defer if (ref_wav) |*w| w.deinit(alloc);
             const req = runtime.Request{
                 .task = .tts,
                 .mode = opts.mode,
                 .text = text,
                 .language = model.language,
                 .voice = opts.voice orelse model.voice,
+                .reference_audio = if (ref_wav) |w| w.samples else null,
+                .reference_rate = if (ref_wav) |w| w.sample_rate else 24000,
+                .reference_channels = if (ref_wav) |w| w.channels else 1,
+                .reference_text = model.reference_text,
             };
             var resp: runtime.Response = undefined;
             if (opts.mode == .streaming) {
@@ -1414,8 +1423,10 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
     // machine's free RAM is skipped honestly, never loaded.
     var tts_session: ?runtime.Session = null;
     defer if (tts_session) |*s| s.deinit(alloc);
+    var tts_model_ref: ?*const config.ModelEntry = null;
     if (pickModel(&eng.cfg, null, .tts)) |tts_model| {
         tts_session = try loadTtsIfFits(alloc, io, out, &eng, tts_model);
+        tts_model_ref = tts_model;
     } else {
         try out.print("tts skipped: no tts model in {s}\n", .{opts.config_path});
     }
@@ -1479,6 +1490,12 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
     // Operator persona override from the config; otherwise the
     // built-in Sando persona (persona.zig) is the default.
     if (eng.cfg.persona_prompt) |p| conv.session.system_prompt = p;
+    // Speaker reference clip for the TTS leg, from the TTS model
+    // entry (Qwen3-TTS Base cannot speak without one).
+    if (tts_model_ref) |m| {
+        conv.session.reference_wav = m.reference_wav;
+        conv.session.reference_text = m.reference_text;
+    }
     conv.pulse = &pulse_client;
     conv.asr = &asr_session;
     if (tts_session) |*s| conv.tts = s;
@@ -1921,6 +1938,8 @@ fn cmdBench(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: Ben
     };
     defer session.deinit(alloc);
 
+    var ref_wav = runtime.loadReferenceWav(alloc, io, model.reference_wav);
+    defer if (ref_wav) |*w| w.deinit(alloc);
     const req: runtime.Request = switch (task_kind) {
         .tts => .{
             .task = .tts,
@@ -1928,6 +1947,10 @@ fn cmdBench(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: Ben
             .text = opts.text orelse "Hello, this is Sando.",
             .language = model.language,
             .voice = model.voice,
+            .reference_audio = if (ref_wav) |w| w.samples else null,
+            .reference_rate = if (ref_wav) |w| w.sample_rate else 24000,
+            .reference_channels = if (ref_wav) |w| w.channels else 1,
+            .reference_text = model.reference_text,
         },
         .asr, .vad => blk: {
             // One second of silence at the engine's sample rate.

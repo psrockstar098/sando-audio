@@ -49,6 +49,15 @@ only — never from a flag or a file, and never logged.
   Piper session fails at creation without it. Install
   `libespeak-ng1` + `espeak-ng-data` on the machine (Ubuntu:
   `apt-get install -y libespeak-ng1 espeak-ng-data`).
+- **Qwen3-TTS Base needs a speaker reference clip**: the base
+  model clones a voice from a short reference recording — without
+  one its session throws at the first request (`error: Runtime`).
+  The shipped config points at `assets/voices/demo-voice.wav`
+  (a synthetic demo voice, transcript in `reference_text`), so the
+  engine speaks out of the box. To change what Sando sounds like,
+  replace `reference_wav` + `reference_text` in the TTS model entry
+  with your own clip and its exact transcript. The fine-tuned LoRA
+  is the real voice once fine-tuning finishes.
 - **Dataset** (optional): `--data-dir` pointing at the
   `datasets/` folder (one JSON per language) enables `vocab` and
   `pronounce` with real cited entries. Without it those two answer

@@ -936,12 +936,18 @@ pub const Server = struct {
             return self.respondError(alloc, req, .tts_unavailable, msg);
         };
         defer tts_session.deinit(alloc);
+        var ref_wav = runtime.loadReferenceWav(alloc, self.io, tts_model.reference_wav);
+        defer if (ref_wav) |*w| w.deinit(alloc);
         const request = runtime.Request{
             .task = .tts,
             .mode = .offline,
             .text = speak,
             .language = lang,
             .voice = tts_model.voice,
+            .reference_audio = if (ref_wav) |w| w.samples else null,
+            .reference_rate = if (ref_wav) |w| w.sample_rate else 24000,
+            .reference_channels = if (ref_wav) |w| w.channels else 1,
+            .reference_text = tts_model.reference_text,
         };
         var resp = tts_session.run(self.io, alloc, request) catch |err| {
             const msg = try std.fmt.allocPrint(alloc, "tts inference failed ({t})", .{err});
