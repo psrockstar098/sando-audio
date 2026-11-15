@@ -19,17 +19,20 @@ low_power = true         # prefer low-power devices
 [[models]]
 name = "qwen3-tts-0.6b"
 kind = "tts"             # "tts" | "stt" | "vad"
-file = "models/qwen3-tts-0.6b-q8_0.gguf"
+file = "models/qwen3-tts-12hz-0.6b-base-q8_0.gguf"
 voice = "liberian-voice-01"
 streaming = true
 language = "en"
 
 [[models]]
-name = "whisper-small"
+# NOTE (Phase 2): the brief's Whisper-small-Q8_0 does not exist as a
+# standalone GGUF in the audio.cpp hub, so Moonshine-Streaming-small
+# (streaming-native ASR, 287 MB) substitutes for it. See STATUS.md.
+name = "moonshine-small"
 kind = "stt"
-file = "models/whisper-small-q8_0.gguf"
+file = "models/moonshine-streaming-small-q8_0.gguf"
 streaming = true
-language = "auto"
+language = "en"
 
 [[models]]
 name = "silero-vad"

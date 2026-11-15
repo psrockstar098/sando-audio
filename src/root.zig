@@ -24,8 +24,8 @@ pub const voicedna = @import("voicedna.zig");
 pub const cache = @import("cache.zig");
 pub const reflex = @import("reflex.zig");
 
-pub const version = "0.1.0";
-pub const version_string = "sando-audio 0.1.0 (Phase 1: Core Engine & Universal Runtime)";
+pub const version = "0.2.0";
+pub const version_string = "sando-audio 0.2.0 (Phase 2: Real-Time Speech & Voice Intelligence)";
 
 test {
     // Zig 0.17 only collects test blocks from files referenced inside a

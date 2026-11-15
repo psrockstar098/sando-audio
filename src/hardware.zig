@@ -139,12 +139,20 @@ fn libExists(name: []const u8) bool {
 }
 
 /// Probe every backend on this host. Returns owned data in `alloc`.
+/// A GPU backend counts as available only when a device can actually
+/// be used: CUDA/HIP need their device nodes, Vulkan needs a DRI
+/// render node (the loader alone is NOT enough — this VM ships
+/// libvulkan.so.1 with no GPU behind it, and audio.cpp session
+/// creation on such a "vulkan" backend fails with Runtime; Phase 2
+/// fix, found by the moonshine ASR smoke test).
 pub fn detectBackends(alloc: std.mem.Allocator, io: std.Io) ![]Backend {
+    const vulkan_device = fileExists(io, "/dev/dri/renderD128") or fileExists(io, "/dev/dri/card0");
+    const vulkan_available = libExists("libvulkan.so.1") and vulkan_device;
     // Static table: the `available` flags below are computed live.
     const backends = [_]Backend{
         .{ .kind = .cuda, .available = fileExists(io, "/dev/nvidiactl") or fileExists(io, "/dev/nvidia0"), .reason = "no NVIDIA device node (/dev/nvidiactl)" },
         .{ .kind = .hip, .available = fileExists(io, "/dev/kfd"), .reason = "no AMD KFD device node (/dev/kfd)" },
-        .{ .kind = .vulkan, .available = libExists("libvulkan.so.1"), .reason = "libvulkan.so.1 not loadable" },
+        .{ .kind = .vulkan, .available = vulkan_available, .reason = "no Vulkan device node (/dev/dri/renderD128)" },
         .{ .kind = .metal, .available = false, .reason = "Metal is macOS-only" },
         .{ .kind = .sycl, .available = libExists("libsycl.so"), .reason = "libsycl.so not loadable" },
         .{ .kind = .webgpu, .available = false, .reason = "WebGPU is a browser/WASM target, not a native backend" },
@@ -205,6 +213,26 @@ test "backend detection reports cpu available" {
         if (b.kind == .webgpu) try std.testing.expect(!b.available);
     }
     try std.testing.expect(cpu_seen);
+}
+
+test "vulkan availability needs a device node, not just the loader" {
+    // Invariant, true on any host: vulkan is available exactly when
+    // the loader loads AND a DRI device node exists. On this VM the
+    // loader exists but /dev/dri does not, so vulkan must be
+    // unavailable — otherwise auto-selection hands audio.cpp a
+    // backend with no device behind it and session creation fails
+    // with Runtime (moonshine ASR smoke, Phase 2).
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    const backends = try detectBackends(alloc, io);
+    defer alloc.free(backends);
+    const dri = fileExists(io, "/dev/dri/renderD128") or fileExists(io, "/dev/dri/card0");
+    for (backends) |b| {
+        if (b.kind == .vulkan) {
+            try std.testing.expectEqual(libExists("libvulkan.so.1") and dri, b.available);
+            if (!dri) try std.testing.expect(!b.available);
+        }
+    }
 }
 
 test "selectBackend auto picks an available backend" {
