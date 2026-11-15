@@ -1,9 +1,14 @@
-# SANDO Audio
+# SANDO Audio — a voice engine
 
-A real-time African voice intelligence engine, engineered in Zig,
-Liberia-first (Liberian English + Koloqua P0). This repository is the
-Zig orchestration/runtime layer over [audio.cpp](https://github.com/0xShug0/audio.cpp)
-via its public C ABI.
+SANDO Audio is a voice engine, nothing more. It hears speech, speaks
+text, and lets a brain talk through it. The thinking — what to say —
+comes from a brain you plug in (any LLM or agent); the engine is the
+voice. It is not a chatbot, a virtual assistant, or an app. It is the
+part that talks.
+
+Engineered in Zig, Liberia-first (Liberian English + Koloqua P0). This
+repository is the Zig orchestration/runtime layer over
+[audio.cpp](https://github.com/0xShug0/audio.cpp) via its public C ABI.
 
 All 5 phases of the roadmap are complete (see [STATUS.md](STATUS.md)):
 Phase 1 Core Engine, Phase 2 Real-Time Speech, Phase 3 Conversational
