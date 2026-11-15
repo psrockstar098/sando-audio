@@ -1,24 +1,22 @@
-# SANDO Audio — Phase 4: Liberian Language & Voice Intelligence
+# SANDO Audio — Phase 5: Developer Ecosystem, Production & Applications
 
 A real-time African voice intelligence engine, engineered in Zig,
 Liberia-first (Liberian English + Koloqua P0). This repository is the
 Zig orchestration/runtime layer over [audio.cpp](https://github.com/0xShug0/audio.cpp)
 via its public C ABI.
 
-Phase 4 is the language layer: an 11-language registry (Liberian
-English, Koloqua, Bassa, Kpelle, Vai, Grebo, Kru, Lorma, Mano, Gola,
-Dan), dataset-backed identification, code-switch detection,
-vocabulary/slang lookup, pronunciation, Polyglot conversation
-(`talk`, `converse --language`), AdaptiveEar ASR routing, a
-LanguageForge contribution schema (validation only — no recordings
-collected), and a measured-accuracy evaluator over real labeled
-examples from the dataset. Nothing is faked — when a model or a
-language capability is missing, the engine says so instead of
-simulating success.
+Phase 5 is the developer surface: the OneAPI REST server
+(`sando-audio serve`, 127.0.0.1 by default, env-only API key,
+multi-session, metrics, static WebUI), ModelHub install/remove
+(CLI + HTTP, SHA-256 manifests), and SDKs for C (26 exports),
+JavaScript/TypeScript, Python, and Zig — all verified live against
+the running server. Nothing is faked — when a model or a language
+capability is missing, the engine says so instead of simulating
+success.
 
 ## Status
 
-Phase 4 is complete and builder-verified on this machine (D's
+Phase 5 is complete and builder-verified on this machine (D's
 independent verification pending before push). See
 [STATUS.md](STATUS.md) for the per-item checklist with exact
 verification results.
@@ -26,7 +24,12 @@ verification results.
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
 - audio.cpp 0.9.3 prebuilt (ABI 0.2.0), 17 tasks, 133 model families
   (0.9.5 was ordered but did not land in Phase 2 — see STATUS.md)
-- **109 unit tests, all passing, no leaks** (was 91 in Phase 3)
+- **126 unit tests, all passing, no leaks** (was 109 in Phase 4)
+- OneAPI live: health/version/languages/identify/vocab/pronounce/
+  route, full conversation lifecycle, metrics, WebUI, VAD, real ASR
+  ("Hello, this is sandos speaking." — 5,977 ms cold, 1,112 ms
+  warmed), TTS honest 503, auth 401/200, ModelHub install/remove
+- SDKs run green against the live server: C, JS, Python, Zig
 - Measured on the real dataset (38,494 entries, 17 languages):
   identification **76.9%** (846/1100, limit 100) — wordlist
   languages 65–100%, Koloqua 27% (mostly ≤3-word glosses; sentences
@@ -37,7 +40,7 @@ verification results.
   prompt, AdaptiveEar routing report; `talk` answers Koloqua in
   Koloqua with verbatim dataset replies (cited)
 - TTS is still not runnable on this VM: the size guard refuses the
-  1.9 GB model load honestly ("only 384 MB is free")
+  1.9 GB model load honestly ("only 672 MB is free")
 - Library `libsando.a` + CLI `sando-audio` + C API (26 exports) +
   sample plugin
 

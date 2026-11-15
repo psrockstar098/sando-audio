@@ -1,3 +1,155 @@
+# SANDO Audio — Phase 5 STATUS
+
+Phase 5 (Developer Ecosystem, Production & Applications): **COMPLETE,
+builder-verified, 2026-11-15** — the last phase of the 5-phase
+roadmap. Built and tested on this VM (Zig 0.17.1, `-Dcpu=baseline`,
+`-j1`). `zig build` exit 0; test binary run directly from the repo
+root = **All 126 tests passed, exit 0, no leaks** (was 109/109 — 17
+new Phase 5 tests). Live server verified end to end with curl:
+health, version (17 tasks), languages (11), identify kq 1.00, vocab
++ pronounce with real cited dataset entries, route honest about no
+Koloqua ASR, full conversation lifecycle (create/ask/get/list/
+delete + 404 after delete), metrics with per-route counts, WebUI
+200, VAD energy segments, **real ASR live** ("Hello, this is sandos
+speaking.", first call 5,977 ms incl. model load, warmed 1,112 ms),
+**TTS honest 503** (1,898 MB model vs 672 MB free), auth 401 without
+a key / 200 with it, ModelHub install (300 MB, 201) + remove (200).
+All four SDK examples run green against the live server (C, JS,
+Python, Zig). D has NOT yet independently re-verified this phase
+from a clean worktree — that step is still open (see below).
+
+## Phase 5 verification summary (builder, this session)
+
+| Check | Result |
+|---|---|
+| `zig build -j1 -Dcpu=baseline` | clean, exit 0 |
+| test binary run directly (repo root) | **126/126 tests pass, exit 0, no leaks** (was 109/109) |
+| `serve` live (port 18222, `--data-dir` datasets) | health ok, version 0.5.0, audio_cpp_linked true, 17 tasks |
+| `GET /v1/languages` live | 11 languages, en-lr supported / rest partial |
+| `POST /v1/language/identify` live | "They fini fool we pekin them." → **kq, 1.00** |
+| `POST /v1/language/vocab` live | `fini` (kq) → real cited entries (koloqua_00005 etc.) |
+| `POST /v1/language/pronounce` live | `pekin` (kq) → attested form, syllables heuristic |
+| `POST /v1/language/route` live | "I de go." → kq, asr none, fallback moonshine-small, honest report |
+| Conversation lifecycle live | create 201 (`en` → `en-lr`), ask → mock reply, get/list show 2 turns, delete 200, get after delete 404 `session_not_found` |
+| `GET /v1/metrics` live | uptime, total_requests, sessions, ASR count 2 / p50 1112 / p95 1112, per-route counts with collapsed ids |
+| `GET /` WebUI live | 200, text/html |
+| `POST /v1/infer?task=vad` live | tone fixture → energy segments 1.0–2.3 s, `source: "energy"` |
+| `POST /v1/infer?task=asr` live | **real speech → "Hello, this is sandos speaking."**, model moonshine_asr, 5,977 ms cold / 1,112 ms warmed |
+| `POST /v1/infer?task=tts` live | **503 `tts_unavailable`** — "tts model qwen3-tts-0.6b is 1898 MB but only 672 MB is free" |
+| Auth live (port 18223, `SANDO_API_KEY=test-key-123`) | no key → 401, wrong key → 401, right key → 200 (`auth: true`); WebUI stays public |
+| ModelHub CLI live | install 300 MB Moonshine copy → 201-equivalent, sha256 in manifest verified byte-identical (`98731a08...`); remove → `removed p5-test-model` |
+| ModelHub HTTP live | install → 201, remove → 200, server stayed up |
+| C example live | `examples/c/converse.c` → 0.5.0, 11 languages, identify "kq", backend cpu linked, 2-turn mock conversation, history 4 |
+| JS example live | `examples/js/talk.mjs` → health/identify/conversation/VAD/TTS-503/metrics, exit 0 |
+| Python example live | `examples/python/talk.py` → same flow, exit 0 |
+| Zig example live | `examples/zig/` builds + runs → 0.5.0, identify kq 1.00, 2-turn conversation, history 4 |
+| Weights / dataset in git | none — `models/` gitignored; dataset read-only outside the repo |
+| audio.cpp version shipped | **0.9.3 prebuilt, NOT 0.9.5** (unchanged — the 0.9.5 source build remains an open follow-up) |
+
+## Phase 5 modules (what landed)
+
+- OneAPI (`src/oneapi.zig`): `ApiErrorCode` (14 codes → HTTP
+  status), `jsonEscape`, `errorJson`, `readApiKey` (env only),
+  `checkAuth` (fixed-length Bearer compare), `memAvailableBytes`
+  (/proc/meminfo), `FitCheck` (model size vs free RAM),
+  `Metrics` (per-route counts, last-64 ASR latencies, p50/p95),
+  `parseJsonBody` + request shapes. `memAvailableBytes` moved here
+  from cli.zig (single copy).
+- ModelHub (`src/models.zig`, install/remove appended):
+  `installModel` (extension + kind validation, streaming
+  copy+SHA-256, `models/<name>.json` manifest),
+  `removeModel` (refuses loaded models; a manifest alone suffices
+  for models installed by an earlier process — the registry is
+  in-memory only), `sha256HexFile`.
+- Server (`src/server.zig`): `std.http` over `std.Io.net`,
+  127.0.0.1 default, one request per connection then close,
+  per-connection arena, JSON bodies capped at 64 KiB, WAV bodies at
+  8 MiB, multi-session (32 default, oldest evicts), env-only key,
+  metrics, static WebUI. Lazy ASR load with sticky failure.
+- CLI (`src/cli.zig`): `serve [--config] [--host] [--port]
+  [--max-sessions] [--data-dir]`, `models install <path> [--name]
+  [--kind]`, `models remove <name>`, usage + version bumped to 0.5.0.
+- SDKs: `sdk/c/sando_audio.h` (all 26 exports) + `examples/c/`,
+  `sdk/js/sando.mjs` + `examples/js/`, `sdk/python/sando.py` +
+  `examples/python/`, `examples/zig/` (own build.zig, links the
+  library like the repo's tests).
+- Docs: `docs/API.md` rewritten as the OneAPI reference,
+  `docs/DEPLOY.md` (run it, limits, what production would need).
+
+## Phase 5 bugs found live (and fixed in this phase)
+
+1. **Server teardown hung forever** (found by the test run:
+   10 min, 0 CPU): closing the listener from another thread does
+   NOT unblock a blocked `accept()` on Linux. Fix: `shutdown`
+   opens a loopback connection to wake accept; the loop sees the
+   stop flag and exits. The `run` loop now also checks the flag
+   after every accept.
+2. **`models install` crashed the server** (found live on a real
+   300 MB install): `readSliceShort` was reading into the reader's
+   own buffer → `@memcpy arguments alias` panic, which killed the
+   whole server process mid-copy (partial file left behind). Fix:
+   separate reader and destination buffers in `installModel` and
+   `sha256HexFile`. The 32-byte unit test never triggered it (the
+   first fill reads straight into the destination); a new 200 KiB
+   regression test covers the copy path.
+3. **CLI `models remove` could not remove anything installed by
+   an earlier process** (found live: exit 1, ModelNotFound): the
+   registry is built from the config at startup, so an installed
+   model was unknown to a fresh process. Fix: `removeModel` falls
+   back to the manifest (`models/<name>.json`) and deletes the
+   file it names.
+4. **C API symbols were missing from `libsando.a`** (found when
+   the C example failed to link: all 26 `sando_*` undefined): no
+   code referenced `root.c_api`, so Zig's lazy analysis never
+   emitted the `export` functions — the C API was never actually
+   linkable before Phase 5. Fix: a `comptime { _ = c_api; }` block
+   in `src/root.zig` forces analysis; `nm` now shows all 26.
+5. **`POST /v1/conversation` with `"language":"en"` answered
+   400** (found by the integration tests): the registry code is
+   `"en-lr"`, not `"en"`. Fix: the handler now runs
+   `language.normalizeCode` (the same legacy mapping the CLI uses).
+6. **Zig 0.17.1 API notes** (all hit while compiling): `**`
+   (array repeat) does not exist — use `std.mem.zeroes`;
+   `ArrayList` is `.empty` + `append(alloc, item)`, no `.writer`
+   and no `.init(alloc)`; `std.json.Stringify.valueAlloc` takes 3
+   args; `http.Status.content_too_large` is `payload_too_large`;
+   `Dir.readFileAlloc` takes `(io, path, alloc, .limited(n))`;
+   `IpAddress.connect` needs `.mode = .stream`; discarding an
+   error value with `_ = err` is an error — use `catch {}`.
+
+## Phase 5 honest gaps
+
+- **WebSocket not built.** Stretch goal only; the core was the
+  priority and HTTP streaming already covers the live path.
+- **No WebRTC, telephony/SIP, distributed inference, load
+  balancing, cloud hosting, voice marketplace, business/calling
+  agents, video voice, or game NPC voices** — explicitly out.
+- **Rust/Go SDKs not shipped** — neither toolchain exists on this
+  VM; the C header is the interop path.
+- **TTS and Koloqua ASR do not run on this VM** (503s above).
+- **Sessions in-memory only**; a restart forgets conversations.
+- **Install uses the source file's basename** for the
+  destination — two files with the same basename collide.
+- **Install copy is slow**: ~33 s for 300 MB on this VM (byte
+  streaming through the reader/writer interfaces, no progress).
+- **D's independent re-verification is still open**: the numbers
+  above are the builder's, from this tree. D verifies from a clean
+  worktree + clean cache before the push (test binary direct, live
+  server smoke, SDK examples), same as Phases 2–4.
+
+## How to verify from a clean checkout
+
+```sh
+zig build -j1 -Dcpu=baseline
+zig build test -j1 -Dcpu=baseline   # then run the test binary directly
+./zig-out/bin/sando-audio version   # 0.5.0
+./zig-out/bin/sando-audio serve --port 8080 --data-dir <datasets>
+curl http://127.0.0.1:8080/v1/health
+curl -X POST http://127.0.0.1:8080/v1/language/identify -d '{"text":"They fini fool we pekin them."}'
+```
+
+---
+
 # SANDO Audio — Phase 4 STATUS
 
 Phase 4 (Liberian Language & Voice Intelligence): **COMPLETE, builder-
