@@ -30,6 +30,7 @@
 const std = @import("std");
 const brain = @import("brain.zig");
 const cache = @import("cache.zig");
+const lang = @import("language.zig");
 const reflex = @import("reflex.zig");
 const runtime = @import("runtime.zig");
 
@@ -104,6 +105,14 @@ pub const Session = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(alloc);
         try out.appendSlice(alloc, "You are Sando, a voice assistant. Answer briefly, in plain spoken words.\n");
+        // Phase 4: the session language shapes the instruction.
+        // Unregistered codes add nothing (the prompt stays exactly
+        // as Phase 3 wrote it).
+        const lang_line = lang.promptFor(self.language);
+        if (lang_line.len > 0) {
+            try out.appendSlice(alloc, lang_line);
+            try out.append(alloc, '\n');
+        }
         for (self.history.items) |t| {
             try out.appendSlice(alloc, switch (t.role) {
                 .user => "User: ",

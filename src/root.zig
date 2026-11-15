@@ -25,9 +25,15 @@ pub const cache = @import("cache.zig");
 pub const reflex = @import("reflex.zig");
 pub const brain = @import("brain.zig");
 pub const conversation = @import("conversation.zig");
+pub const language = @import("language.zig");
+pub const vocabulary = @import("vocabulary.zig");
+pub const pronunciation = @import("pronunciation.zig");
+pub const adaptive_ear = @import("adaptive_ear.zig");
+pub const languageforge = @import("languageforge.zig");
+pub const evaluate = @import("evaluate.zig");
 
-pub const version = "0.3.0";
-pub const version_string = "sando-audio 0.3.0 (Phase 3: Intelligence & Conversational AI)";
+pub const version = "0.4.0";
+pub const version_string = "sando-audio 0.4.0 (Phase 4: Liberian Language & Voice Intelligence)";
 
 test {
     // Zig 0.17 only collects test blocks from files referenced inside a
@@ -53,4 +59,10 @@ test {
     _ = @import("reflex.zig");
     _ = @import("brain.zig");
     _ = @import("conversation.zig");
+    _ = @import("language.zig");
+    _ = @import("vocabulary.zig");
+    _ = @import("pronunciation.zig");
+    _ = @import("adaptive_ear.zig");
+    _ = @import("languageforge.zig");
+    _ = @import("evaluate.zig");
 }

@@ -36,9 +36,15 @@ const audiosense = @import("audiosense.zig");
 const brain = @import("brain.zig");
 const conversation = @import("conversation.zig");
 const models = @import("models.zig");
+const language = @import("language.zig");
+const vocabulary = @import("vocabulary.zig");
+const pronunciation = @import("pronunciation.zig");
+const adaptive_ear = @import("adaptive_ear.zig");
+const languageforge = @import("languageforge.zig");
+const evaluate = @import("evaluate.zig");
 
 pub const usage =
-    \\sando-audio 0.3.0 — SANDO Audio, Phase 3 (Intelligence & Conversational AI)
+    \\sando-audio 0.4.0 — SANDO Audio, Phase 4 (Liberian Language & Voice Intelligence)
     \\
     \\Usage:
     \\  sando-audio version
@@ -52,6 +58,14 @@ pub const usage =
     \\  sando-audio converse [--config path] [--wav turn.wav ...] [--interrupt in.wav]
     \\                   [--brain mock|http] [--brain-url url] [--brain-model name]
     \\                   [--voice name] [--language en] [--cache] [--out-dir dir]
+    \\  sando-audio talk <text> [--language en] [--voice name] [--correct wrong=right ...]
+    \\  sando-audio language list
+    \\  sando-audio language identify <text> [--data-dir dir]
+    \\  sando-audio language vocab <word> [--language kq] --data-dir dir
+    \\  sando-audio language pronounce <word> [--language kq] --data-dir dir
+    \\  sando-audio language route <text>
+    \\  sando-audio language evaluate [--data-dir dir] [--limit n]
+    \\  sando-audio languageforge validate <file>
     \\  sando-audio voices list
     \\  sando-audio voices enroll-synthetic <id> <name> [--language en]
     \\  sando-audio voices delete <id>
@@ -130,6 +144,26 @@ pub const ConverseOpts = struct {
     out_dir: []const u8 = "converse-out",
 };
 
+/// Language commands (Phase 4, Polyglot / NativeTongue).
+pub const LanguageOpts = union(enum) {
+    list,
+    identify: struct { text: []const u8, data_dir: ?[]const u8 },
+    vocab: struct { word: []const u8, language: []const u8, data_dir: ?[]const u8 },
+    pronounce: struct { word: []const u8, language: []const u8, data_dir: ?[]const u8 },
+    route: struct { text: []const u8 },
+    evaluate: struct { data_dir: ?[]const u8, limit: usize },
+};
+
+/// Text-only conversation (Phase 4, Polyglot demo): one mock-brain
+/// turn over text, no audio, no weights. `correct` holds
+/// "wrong=right" pairs for the AdaptiveEar correction lexicon.
+pub const TalkOpts = struct {
+    text: []const u8,
+    language: []const u8 = "en",
+    voice: []const u8 = "v1",
+    correct: []const []const u8 = &.{},
+};
+
 pub const Command = union(enum) {
     version,
     doctor,
@@ -139,6 +173,9 @@ pub const Command = union(enum) {
     stream: StreamOpts,
     vad: VadOpts,
     converse: ConverseOpts,
+    talk: TalkOpts,
+    language: LanguageOpts,
+    languageforge_validate: struct { path: []const u8 },
     voices: VoicesOpts,
     bench: BenchOpts,
     models_list: struct { config_path: []const u8 },
@@ -325,6 +362,103 @@ pub fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) ParseError!
         return .{ .converse = opts };
     }
 
+    if (std.mem.eql(u8, cmd, "language")) {
+        if (args.len == 2 and std.mem.eql(u8, args[1], "list")) {
+            return .{ .language = .list };
+        }
+        if (args.len >= 3 and std.mem.eql(u8, args[1], "identify")) {
+            var data_dir: ?[]const u8 = null;
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--data-dir")) {
+                    data_dir = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .language = .{ .identify = .{ .text = args[2], .data_dir = data_dir } } };
+        }
+        if (args.len >= 3 and std.mem.eql(u8, args[1], "vocab")) {
+            var lang: []const u8 = "kq";
+            var data_dir: ?[]const u8 = null;
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--language")) {
+                    lang = args[i + 1];
+                    i += 1;
+                } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--data-dir")) {
+                    data_dir = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .language = .{ .vocab = .{ .word = args[2], .language = lang, .data_dir = data_dir } } };
+        }
+        if (args.len >= 3 and std.mem.eql(u8, args[1], "pronounce")) {
+            var lang: []const u8 = "kq";
+            var data_dir: ?[]const u8 = null;
+            var i: usize = 3;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--language")) {
+                    lang = args[i + 1];
+                    i += 1;
+                } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--data-dir")) {
+                    data_dir = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .language = .{ .pronounce = .{ .word = args[2], .language = lang, .data_dir = data_dir } } };
+        }
+        if (args.len == 3 and std.mem.eql(u8, args[1], "route")) {
+            return .{ .language = .{ .route = .{ .text = args[2] } } };
+        }
+        if (args.len >= 2 and std.mem.eql(u8, args[1], "evaluate")) {
+            var data_dir: ?[]const u8 = null;
+            var limit: usize = 50;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--data-dir")) {
+                    data_dir = args[i + 1];
+                    i += 1;
+                } else if (i + 1 < args.len and std.mem.eql(u8, args[i], "--limit")) {
+                    limit = std.fmt.parseInt(usize, args[i + 1], 10) catch return error.Usage;
+                    if (limit == 0) return error.Usage;
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .language = .{ .evaluate = .{ .data_dir = data_dir, .limit = limit } } };
+        }
+        return error.Usage;
+    }
+
+    if (std.mem.eql(u8, cmd, "languageforge")) {
+        if (args.len == 3 and std.mem.eql(u8, args[1], "validate")) {
+            return .{ .languageforge_validate = .{ .path = args[2] } };
+        }
+        return error.Usage;
+    }
+
+    if (std.mem.eql(u8, cmd, "talk")) {
+        if (args.len < 2) return error.Usage;
+        var opts = TalkOpts{ .text = args[1] };
+        var correct = std.ArrayList([]const u8).empty;
+        errdefer correct.deinit(alloc);
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (i + 1 < args.len and std.mem.eql(u8, a, "--language")) {
+                opts.language = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--voice")) {
+                opts.voice = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--correct")) {
+                try correct.append(alloc, args[i + 1]);
+                i += 1;
+            } else return error.Usage;
+        }
+        opts.correct = try correct.toOwnedSlice(alloc);
+        return .{ .talk = opts };
+    }
+
     if (std.mem.eql(u8, cmd, "voices")) {
         if (args.len >= 2 and std.mem.eql(u8, args[1], "list")) {
             if (args.len != 2) return error.Usage;
@@ -332,15 +466,15 @@ pub fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) ParseError!
         }
         if (args.len >= 2 and std.mem.eql(u8, args[1], "enroll-synthetic")) {
             if (args.len < 4) return error.Usage;
-            var language: []const u8 = "en";
+            var lang: []const u8 = "en";
             var i: usize = 4;
             while (i < args.len) : (i += 1) {
                 if (i + 1 < args.len and std.mem.eql(u8, args[i], "--language")) {
-                    language = args[i + 1];
+                    lang = args[i + 1];
                     i += 1;
                 } else return error.Usage;
             }
-            return .{ .voices = .{ .enroll_synthetic = .{ .id = args[2], .name = args[3], .language = language } } };
+            return .{ .voices = .{ .enroll_synthetic = .{ .id = args[2], .name = args[3], .language = lang } } };
         }
         if (args.len == 3 and std.mem.eql(u8, args[1], "delete")) {
             return .{ .voices = .{ .delete = .{ .id = args[2] } } };
@@ -519,6 +653,9 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
         .stream => |opts| return cmdStream(alloc, io, out, opts),
         .vad => |opts| return cmdVad(alloc, io, out, opts),
         .converse => |opts| return cmdConverse(alloc, io, out, opts),
+        .talk => |opts| return cmdTalk(alloc, io, out, opts),
+        .language => |opts| return cmdLanguage(alloc, io, out, opts),
+        .languageforge_validate => |v| return cmdLanguageForgeValidate(alloc, io, out, v.path),
         .voices => |opts| return cmdVoices(alloc, io, out, opts),
         .bench => |opts| return cmdBench(alloc, io, out, opts),
     }
@@ -1001,6 +1138,17 @@ fn runConverseTurn(
     var result = try conv.processAudio(samples, sample_rate, channels);
     defer result.deinit(alloc);
     try out.print("\n  you said: \"{s}\"\n", .{result.transcript});
+    // Phase 4 (AdaptiveEar): what language was heard, and which ASR
+    // route that implies. Marker-only identification (no dataset
+    // load mid-turn) — the route is a decision, not a model.
+    if (language.identify(alloc, result.transcript, null)) |id| {
+        const route = adaptive_ear.routeFor(id.language);
+        const rep = adaptive_ear.report(alloc, &route) catch null;
+        if (rep) |r| {
+            defer alloc.free(r);
+            try out.print("  {s} (confidence {d:.2}, {d}/{d} tokens scored)\n", .{ r, id.confidence, id.scored, id.tokens });
+        }
+    } else |_| {}
     if (result.partial_reply) |p| try out.print("  reply cut short at: \"{s}\"\n", .{p});
     if (result.interrupt_text) |t| try out.print("  interrupted by: \"{s}\"\n", .{t});
     try out.print("  legs: asr={s} brain={s} tts={s} (spoken {d}, cached {d}, skipped {d}, tts errors {d})\n", .{
@@ -1192,6 +1340,256 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
     return 0;
 }
 
+/// Load every registry language that has a dataset file in
+/// `dir`. Missing files are skipped (the directory may hold only
+/// some languages); a missing directory is an error.
+fn loadVocabulary(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) !vocabulary.Vocabulary {
+    var dir_handle = std.Io.Dir.cwd().openDir(io, dir, .{}) catch {
+        std.debug.print("no dataset directory at {s}\n", .{dir});
+        return error.FileNotFound;
+    };
+    dir_handle.close(io);
+    var vocab = vocabulary.Vocabulary.init(alloc);
+    errdefer vocab.deinit();
+    for (&language.registry) |l| {
+        const file = l.dataset_file orelse continue;
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, file });
+        defer alloc.free(path);
+        vocab.load(io, l.code, path) catch |err| {
+            if (err == error.FileNotFound) continue;
+            return err;
+        };
+    }
+    return vocab;
+}
+
+/// Phase 4 language commands: list / identify / vocab /
+/// pronounce / route / evaluate.
+fn cmdLanguage(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: LanguageOpts) !u8 {
+    switch (opts) {
+        .list => {
+            for (&language.registry) |l| {
+                try out.print("  {s}  {s}  [{s}]  script={s}  asr={s}  tts={s}\n", .{
+                    l.code,
+                    l.name,
+                    @tagName(l.status),
+                    l.script,
+                    l.asr_model orelse "none",
+                    if (l.tts_available) "yes" else "no",
+                });
+            }
+            try out.flush();
+            return 0;
+        },
+        .identify => |o| {
+            var vocab: ?vocabulary.Vocabulary = null;
+            defer if (vocab) |*v| v.deinit();
+            if (o.data_dir) |dir| {
+                vocab = loadVocabulary(alloc, io, dir) catch |err| {
+                    std.debug.print("cannot load dataset from {s} ({t})\n", .{ dir, err });
+                    return 1;
+                };
+                try out.print("(dataset: {d} language(s) loaded)\n", .{vocab.?.languageCount()});
+            } else {
+                try out.print("(dataset not loaded — pass --data-dir <path> for wordlist-backed identification)\n", .{});
+            }
+            const vptr: ?*const vocabulary.Vocabulary = if (vocab) |*v| v else null;
+            const id = try language.identify(alloc, o.text, vptr);
+            const lang = language.find(id.language);
+            try out.print("language: {s} ({s})\n", .{ id.language, if (lang) |l| l.name else "Unknown" });
+            try out.print("confidence: {d:.2} ({d}/{d} tokens scored)\n", .{ id.confidence, id.scored, id.tokens });
+            try out.print("scores:", .{});
+            for (&language.registry, 0..) |l, i| {
+                if (id.scores[i] > 0) try out.print(" {s} {d:.1}", .{ l.code, id.scores[i] });
+            }
+            try out.print("\n", .{});
+            try out.flush();
+            return 0;
+        },
+        .vocab => |o| {
+            const dir = o.data_dir orelse {
+                std.debug.print("vocab needs --data-dir <path> to the dataset directory\n", .{});
+                return 2;
+            };
+            const code = language.normalizeCode(o.language) orelse {
+                std.debug.print("unknown language {s}\n", .{o.language});
+                return 2;
+            };
+            var vocab = loadVocabulary(alloc, io, dir) catch |err| {
+                std.debug.print("cannot load dataset from {s} ({t})\n", .{ dir, err });
+                return 1;
+            };
+            defer vocab.deinit();
+            const ds = vocab.dataset(code) orelse {
+                std.debug.print("no dataset for {s} in {s}\n", .{ code, dir });
+                return 1;
+            };
+            const hits = try ds.lookup(alloc, o.word, 8);
+            defer alloc.free(hits);
+            if (hits.len == 0) {
+                try out.print("no entry for \"{s}\" in {s}\n", .{ o.word, code });
+                try out.flush();
+                return 0;
+            }
+            for (hits) |h| {
+                try out.print("  \"{s}\" [{s}] = \"{s}\"  ({s}, {s})\n", .{
+                    h.entry.response,
+                    h.side,
+                    if (h.entry.input.len > 0) h.entry.input else h.entry.standard_english,
+                    h.entry.id,
+                    h.entry.source,
+                });
+            }
+            try out.flush();
+            return 0;
+        },
+        .pronounce => |o| {
+            const dir = o.data_dir orelse {
+                std.debug.print("pronounce needs --data-dir <path> to the dataset directory\n", .{});
+                return 2;
+            };
+            const code = language.normalizeCode(o.language) orelse {
+                std.debug.print("unknown language {s}\n", .{o.language});
+                return 2;
+            };
+            var vocab = loadVocabulary(alloc, io, dir) catch |err| {
+                std.debug.print("cannot load dataset from {s} ({t})\n", .{ dir, err });
+                return 1;
+            };
+            defer vocab.deinit();
+            const ds = vocab.dataset(code) orelse {
+                std.debug.print("no dataset for {s} in {s}\n", .{ code, dir });
+                return 1;
+            };
+            const p = (try pronunciation.lookup(alloc, ds, o.word)) orelse {
+                try out.print("no pronunciation for \"{s}\" in {s} — the dataset has no such word\n", .{ o.word, code });
+                try out.flush();
+                return 0;
+            };
+            defer {
+                for (p.syllables) |s| alloc.free(s);
+                alloc.free(p.syllables);
+            }
+            try out.print("{s} -> {s}  (syllables: ", .{ p.word, p.attested_form });
+            for (p.syllables, 0..) |s, i| {
+                if (i > 0) try out.print("-", .{});
+                try out.print("{s}", .{s});
+            }
+            try out.print(", heuristic)  \"{s}\"  ({s}, {s})\n", .{ p.meaning, p.id, p.source });
+            try out.flush();
+            return 0;
+        },
+        .route => |o| {
+            const id = try language.identify(alloc, o.text, null);
+            const route = adaptive_ear.routeFor(id.language);
+            const rep = try adaptive_ear.report(alloc, &route);
+            defer alloc.free(rep);
+            try out.print("{s} (confidence {d:.2})\n", .{ rep, id.confidence });
+            try out.flush();
+            return 0;
+        },
+        .evaluate => |o| {
+            const dir = o.data_dir orelse {
+                std.debug.print("evaluate needs --data-dir <path> to the dataset directory\n", .{});
+                return 2;
+            };
+            var vocab = loadVocabulary(alloc, io, dir) catch |err| {
+                std.debug.print("cannot load dataset from {s} ({t})\n", .{ dir, err });
+                return 1;
+            };
+            defer vocab.deinit();
+            try out.print("dataset: {d} language(s) loaded, limit {d} per language\n", .{ vocab.languageCount(), o.limit });
+            const ident = try evaluate.evaluateIdentification(alloc, &vocab, o.limit);
+            defer alloc.free(ident.per_language);
+            const cs = try evaluate.evaluateCodeSwitch(alloc, &vocab, o.limit);
+            try evaluate.printReport(out, &ident, &cs);
+            try out.flush();
+            return 0;
+        },
+    }
+}
+
+/// Validate a LanguageForge contribution JSON file. Exit 0 when
+/// valid, 1 with the problems listed when not.
+fn cmdLanguageForgeValidate(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, path: []const u8) !u8 {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1 << 20)) catch |err| {
+        std.debug.print("cannot read {s} ({t})\n", .{ path, err });
+        return 1;
+    };
+    defer alloc.free(bytes);
+    var c = languageforge.parse(alloc, bytes) catch |err| {
+        std.debug.print("invalid contribution JSON in {s} ({t})\n", .{ path, err });
+        return 1;
+    };
+    defer languageforge.freeContribution(alloc, &c);
+    const problems = try c.validate(alloc);
+    defer alloc.free(problems);
+    if (problems.len == 0) {
+        try out.print("valid contribution: {s} [{s}] \"{s}\" speaker {s}\n", .{ c.id, c.language, c.transcript, c.speaker_id });
+        try out.flush();
+        return 0;
+    }
+    try out.print("invalid contribution: {d} problem(s)\n", .{problems.len});
+    for (problems) |p| {
+        try out.print("  {s}: {s}\n", .{ p.field, p.message });
+    }
+    try out.flush();
+    return 1;
+}
+
+/// Text-only Polyglot conversation: one mock-brain turn over
+/// text. No audio, no weights. Prints the reply, the detected
+/// language of the input, and the AdaptiveEar route.
+fn cmdTalk(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: TalkOpts) !u8 {
+    const code = language.normalizeCode(opts.language) orelse {
+        std.debug.print("unknown language {s}\n", .{opts.language});
+        return 2;
+    };
+    // AdaptiveEar corrections first: the brain hears the corrected
+    // text, as it would a corrected transcript.
+    var lex = adaptive_ear.CorrectionLexicon.init(alloc);
+    defer lex.deinit();
+    for (opts.correct) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse {
+            std.debug.print("--correct needs wrong=right, got \"{s}\"\n", .{pair});
+            return 2;
+        };
+        try lex.add(pair[0..eq], pair[eq + 1 ..]);
+    }
+    const fixed = try lex.apply(alloc, opts.text);
+    defer alloc.free(fixed.text);
+    if (fixed.corrected > 0) {
+        try out.print("corrected: {d} word(s) -> \"{s}\"\n", .{ fixed.corrected, fixed.text });
+    }
+
+    const id = try language.identify(alloc, fixed.text, null);
+    const route = adaptive_ear.routeFor(id.language);
+    const rep = try adaptive_ear.report(alloc, &route);
+    defer alloc.free(rep);
+    try out.print("{s} (confidence {d:.2})\n", .{ rep, id.confidence });
+
+    var mock = brain.MockBrain{};
+    var conv = conversation.Conversation.init(alloc, io, mock.asBrain(), opts.voice, code) catch |err| {
+        std.debug.print("cannot start conversation ({t})\n", .{err});
+        return 1;
+    };
+    defer conv.deinit();
+    var result = try conv.processText(fixed.text);
+    defer result.deinit(alloc);
+    try out.print("Sando: {s}\n", .{result.reply});
+    if (std.mem.eql(u8, code, "kq") and std.mem.eql(u8, result.reply, brain.MockBrain.default_reply_text)) {
+        try out.print("note: the mock brain answers from scripted replies — its Koloqua is verbatim dataset sentences only (see brain.zig).\n", .{});
+    }
+    try out.print("legs: brain={s} tts={s} (spoken {d}, skipped {d})\n", .{
+        @tagName(result.brain),
+        @tagName(result.tts),
+        result.sentences_spoken,
+        result.sentences_skipped,
+    });
+    try out.flush();
+    return 0;
+}
+
 /// VoiceDNA voice profiles: list, enroll a synthetic voice, delete.
 fn cmdVoices(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VoicesOpts) !u8 {
     const store = voicedna.VoiceStore.init(alloc, io, "voices");
@@ -1344,6 +1742,26 @@ test "parseArgs accepts the main commands" {
     try std.testing.expectEqualStrings("examples/plugins/noop/manifest.toml", pm.plugins_load_manifest.path);
     const b = try parseArgs(alloc, &.{ "bench", "--iterations", "50" });
     try std.testing.expectEqual(@as(u64, 50), b.bench.iterations);
+    const ll = try parseArgs(alloc, &.{ "language", "list" });
+    try std.testing.expect(ll.language == .list);
+    const li = try parseArgs(alloc, &.{ "language", "identify", "I de go.", "--data-dir", "datasets" });
+    try std.testing.expectEqualStrings("I de go.", li.language.identify.text);
+    try std.testing.expectEqualStrings("datasets", li.language.identify.data_dir.?);
+    const lv = try parseArgs(alloc, &.{ "language", "vocab", "fini", "--language", "kq", "--data-dir", "datasets" });
+    try std.testing.expectEqualStrings("fini", lv.language.vocab.word);
+    try std.testing.expectEqualStrings("kq", lv.language.vocab.language);
+    const lr = try parseArgs(alloc, &.{ "language", "route", "I de go." });
+    try std.testing.expectEqualStrings("I de go.", lr.language.route.text);
+    const le = try parseArgs(alloc, &.{ "language", "evaluate", "--data-dir", "datasets", "--limit", "10" });
+    try std.testing.expectEqual(@as(usize, 10), le.language.evaluate.limit);
+    const lf = try parseArgs(alloc, &.{ "languageforge", "validate", "contrib.json" });
+    try std.testing.expectEqualStrings("contrib.json", lf.languageforge_validate.path);
+    const tk = try parseArgs(alloc, &.{ "talk", "I de go.", "--language", "kq", "--correct", "the=de" });
+    defer alloc.free(tk.talk.correct);
+    try std.testing.expectEqualStrings("I de go.", tk.talk.text);
+    try std.testing.expectEqualStrings("kq", tk.talk.language);
+    try std.testing.expectEqual(@as(usize, 1), tk.talk.correct.len);
+    try std.testing.expectEqualStrings("the=de", tk.talk.correct[0]);
 }
 
 test "parseArgs rejects bad input" {
@@ -1359,6 +1777,11 @@ test "parseArgs rejects bad input" {
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "voices", "delete" }));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"converse"}));
     try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "converse", "--wav", "a.wav", "--brain", "telepathy" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"language"}));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "language", "identify" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "language", "evaluate", "--limit", "0" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{ "languageforge", "validate" }));
+    try std.testing.expectError(error.Usage, parseArgs(alloc, &.{"talk"}));
 }
 
 test "parseArgs accepts converse with repeatable --wav" {

@@ -15,8 +15,9 @@ const audio = @import("audio.zig");
 const streaming = @import("streaming.zig");
 const brain = @import("brain.zig");
 const conversation = @import("conversation.zig");
+const lang = @import("language.zig");
 
-pub const version_string: [:0]const u8 = "0.3.0";
+pub const version_string: [:0]const u8 = "0.4.0";
 
 const CEngine = struct {
     threaded: std.Io.Threaded,
@@ -531,6 +532,46 @@ pub export fn sando_conversation_destroy(c: ?*CConversation) void {
     std.heap.c_allocator.destroy(conv);
 }
 
+// ---------------------------------------------------------------------------
+// Language entry points (Phase 4).
+//
+// Identification here uses the built-in marker sets only (no dataset
+// is loaded — the C API has no dataset path). Returned code/name
+// strings are static; the identify result is owned by the caller
+// (free with sando_free_string).
+// ---------------------------------------------------------------------------
+
+/// Number of languages in the registry (11 in Phase 4).
+pub export fn sando_language_count() usize {
+    return lang.registry.len;
+}
+
+/// Language code at `index` ("en-lr", "kq", ...), or NULL when out
+/// of range. Static string.
+pub export fn sando_language_code(index: usize) ?[*:0]const u8 {
+    if (index >= lang.registry.len) return null;
+    return lang.registry[index].code.ptr;
+}
+
+/// Display name for a code ("kq" -> "Koloqua"), or NULL when the
+/// code is not registered. Static string.
+pub export fn sando_language_name(code: [*:0]const u8) ?[*:0]const u8 {
+    const l = lang.find(std.mem.span(code)) orelse return null;
+    return l.name.ptr;
+}
+
+/// Identify the language of `text`; returns the code ("kq",
+/// "en-lr", "und", ...). Owned by the caller — free with
+/// sando_free_string. NULL only on allocation failure.
+pub export fn sando_language_identify(text: [*:0]const u8) ?[*:0]const u8 {
+    const alloc = std.heap.c_allocator;
+    const id = lang.identify(alloc, std.mem.span(text), null) catch {
+        setError("OutOfMemory");
+        return null;
+    };
+    return dupeCString(id.language);
+}
+
 test "c api create and destroy with a real config" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -578,7 +619,7 @@ test "c api create fails honestly without a config file" {
     const e = sando_engine_create("config/does-not-exist.toml");
     try std.testing.expect(e == null);
     try std.testing.expect(!std.mem.eql(u8, std.mem.span(sando_last_error()), "no error"));
-    try std.testing.expectEqualStrings("0.3.0", std.mem.span(sando_version()));
+    try std.testing.expectEqualStrings("0.4.0", std.mem.span(sando_version()));
     try std.testing.expectEqual(@as(c_int, -1), sando_config_validate("config/does-not-exist.toml"));
 }
 
@@ -661,8 +702,8 @@ test "c api conversation mock asks and remembers history" {
     defer sando_engine_destroy(e);
 
     const voice: [:0]const u8 = "v1";
-    const lang: [:0]const u8 = "en";
-    const c = sando_conversation_create_mock(e, voice.ptr, lang.ptr) orelse {
+    const lang_code: [:0]const u8 = "en";
+    const c = sando_conversation_create_mock(e, voice.ptr, lang_code.ptr) orelse {
         std.debug.print("conversation create failed: {s}\n", .{std.mem.span(sando_last_error())});
         return error.ConversationCreateFailed;
     };
@@ -732,6 +773,25 @@ test "c api conversation agent callback answers" {
     defer sando_free_string(@constCast(reply));
     try std.testing.expectEqualStrings("agent says hi", std.mem.span(reply));
     try std.testing.expectEqual(@as(usize, 2), sando_conversation_history_count(c));
+}
+
+test "c api language registry and identify" {
+    try std.testing.expectEqual(@as(usize, 11), sando_language_count());
+    try std.testing.expectEqualStrings("en-lr", std.mem.span(sando_language_code(0).?));
+    try std.testing.expectEqualStrings("kq", std.mem.span(sando_language_code(1).?));
+    try std.testing.expect(sando_language_code(11) == null);
+    try std.testing.expectEqualStrings("Koloqua", std.mem.span(sando_language_name("kq").?));
+    try std.testing.expect(sando_language_name("klingon") == null);
+
+    // Real Koloqua (koloqua_00043): "I de go."
+    const kq: [:0]const u8 = "I de go.";
+    const id = sando_language_identify(kq.ptr) orelse return error.IdentifyFailed;
+    defer sando_free_string(@constCast(id));
+    try std.testing.expectEqualStrings("kq", std.mem.span(id));
+    const en: [:0]const u8 = "The book is on the table.";
+    const id2 = sando_language_identify(en.ptr) orelse return error.IdentifyFailed;
+    defer sando_free_string(@constCast(id2));
+    try std.testing.expectEqualStrings("en-lr", std.mem.span(id2));
 }
 
 test "c api conversation create fails honestly" {

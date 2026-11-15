@@ -141,6 +141,16 @@ pub const MockBrain = struct {
         .{ .needle = "what can you do", .reply = "I can listen to your voice, understand what you say, and answer back in speech. I speak English and I am learning Koloqua." },
         .{ .needle = "hello", .reply = "Hello! I am Sando. Speak to me and I will answer." },
         .{ .needle = "thank", .reply = "You are welcome. I am here whenever you want to talk." },
+        // Koloqua replies (Phase 4): each reply is a VERBATIM
+        // dataset response, cited by id. The mock brain has no
+        // Koloqua generative ability — outside these scripted
+        // replies it answers in English. Rules are checked in
+        // order, after the English rules above.
+        .{ .needle = "de go", .reply = "I de go." }, // koloqua_00043
+        .{ .needle = "fini", .reply = "They fini fool we pekin them." }, // koloqua_00005
+        .{ .needle = "give me", .reply = "Give me, yah." }, // koloqua_00110
+        .{ .needle = "that man", .reply = "That man na come o." }, // koloqua_00109
+        .{ .needle = "proverb", .reply = "Your house won't sell you, the street can't buy you." }, // koloqua_00150
     };
 
     pub fn asBrain(self: *MockBrain) Brain {
