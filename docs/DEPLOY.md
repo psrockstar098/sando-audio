@@ -40,7 +40,9 @@ only — never from a flag or a file, and never logged.
 - **RAM**: ASR (Moonshine, 300 MB) runs on this VM (first call
   ~6 s including load, warmed ~1.1 s). TTS (Qwen3-TTS 0.6B, 2 GB)
   does **not** fit in the ~1 GB free on this VM and answers 503
-  with the measured numbers. A machine with 4 GB+ free runs it.
+  with the measured numbers. A machine with 4 GB+ free runs it —
+  and CI proves TTS on a 16 GB GitHub runner (see README.md,
+  Continuous integration).
 - **Dataset** (optional): `--data-dir` pointing at the
   `datasets/` folder (one JSON per language) enables `vocab` and
   `pronounce` with real cited entries. Without it those two answer

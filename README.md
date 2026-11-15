@@ -1,9 +1,15 @@
-# SANDO Audio — Phase 5: Developer Ecosystem, Production & Applications
+# SANDO Audio
 
 A real-time African voice intelligence engine, engineered in Zig,
 Liberia-first (Liberian English + Koloqua P0). This repository is the
 Zig orchestration/runtime layer over [audio.cpp](https://github.com/0xShug0/audio.cpp)
 via its public C ABI.
+
+All 5 phases of the roadmap are complete (see [STATUS.md](STATUS.md)):
+Phase 1 Core Engine, Phase 2 Real-Time Speech, Phase 3 Conversational
+AI, Phase 4 Liberian Language, Phase 5 Developer Ecosystem. audio.cpp
+0.9.5 is in (148 model families) and CI runs the full suite plus a
+live TTS smoke test on every push.
 
 Phase 5 is the developer surface: the OneAPI REST server
 (`sando-audio serve`, 127.0.0.1 by default, env-only API key,
@@ -16,10 +22,9 @@ success.
 
 ## Status
 
-Phase 5 is complete and builder-verified on this machine (D's
-independent verification pending before push). See
-[STATUS.md](STATUS.md) for the per-item checklist with exact
-verification results.
+All 5 phases are complete, independently verified from clean
+worktrees, and pushed (origin/main). See [STATUS.md](STATUS.md) for
+the per-item checklist with exact verification results.
 
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
 - audio.cpp 0.9.5 source-built on this VM (ABI 0.3.0), 17 tasks, 148 model families
@@ -40,7 +45,9 @@ verification results.
   prompt, AdaptiveEar routing report; `talk` answers Koloqua in
   Koloqua with verbatim dataset replies (cited)
 - TTS is still not runnable on this VM: the size guard refuses the
-  1.9 GB model load honestly ("only 672 MB is free")
+  1.9 GB model load honestly ("only 672 MB is free"). CI proves TTS
+  on a 16 GB GitHub runner instead — see Continuous integration
+  below
 - Library `libsando.a` + CLI `sando-audio` + C API (26 exports) +
   sample plugin
 
@@ -62,6 +69,22 @@ use is recorded in [STATUS.md](STATUS.md).
 > The bindings target ABI 0.2.0, which is also present in ABI 0.3.0
 > (0.9.5 only adds `audiocpp_log_set` and
 > `audiocpp_session_create_with_impl`).
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to main (and on pull
+requests): Ubuntu 24.04, 4 vCPU, 16 GB RAM. It builds audio.cpp
+v0.9.5 from source, builds the engine with `-Dcpu=baseline`,
+downloads the Moonshine ASR + Qwen3-TTS models, runs the full test
+suite, checks `doctor` (ABI 0x300, build 0.9.5, 148 families),
+then proves TTS end to end — it synthesizes "Hello, this is
+Sando." and transcribes the result back through ASR. Runs:
+https://github.com/psrockstar098/sando-audio/actions
+
+The CI run tests just the engine, with the stock Qwen3-TTS base
+model the config points at. The real voice is the fine-tuned
+Qwen3-TTS-0.6B LoRA, which is not finished yet — swapping it in
+later is a config/model change, not a workflow change.
 
 ## Configure
 
@@ -141,15 +164,18 @@ docs/           API.md — library, C API, plugin ABI, config schema
   missing library, device, or model is an error with a reason.
 - **Zero-copy audio path.** Frames are preallocated, moved by pointer
   through lock-free rings. Nothing in the audio path allocates.
-- **Prebuilt first.** audio.cpp is used as a prebuilt binary; a full
-  source build OOMs on small machines and is not attempted.
+- **Source build for audio.cpp.** The 0.9.4/0.9.5 prebuilts need
+  glibc 2.43 and do not load on Ubuntu 24.04 (glibc 2.39), so the
+  vendored library is the 0.9.5 SOURCE build (see STATUS.md and the
+  CI workflow, which builds it from the v0.9.5 tag). A prebuilt
+  still works wherever it loads.
 - **Config is strict.** Unknown sections and keys are errors, so
   `config validate` catches typos instead of ignoring them.
 - **Reload is conservative.** Changing mode, sample rate, channels, or
   the model list requires a restart; backend and flag changes reload
   live. The engine refuses to dangle pointers instead of guessing.
 
-## What Phase 4 does NOT do (honest gaps)
+## Honest gaps
 
 - Koloqua ASR and TTS do not exist yet — Koloqua conversation is
   text only in this phase; `route` says so and falls back to
@@ -161,10 +187,11 @@ docs/           API.md — library, C API, plugin ABI, config schema
 - Code-switch detection is poor on constructed examples (8/100
   boundaries, precision 0.03, recall 0.08) — it over-predicts
   switches because Koloqua halves contain English words.
-- TTS inference is NOT yet verified live: the Qwen3-TTS weight is
+- TTS inference is NOT yet verified live on this VM: the Qwen3-TTS weight is
   1.86 GiB and this VM has ~0.4–1.1 GB free, so the size guard
   refuses the load instead of OOMing (see STATUS.md). ASR, the brain,
-  and barge-in are verified live.
+  and barge-in are verified live. The first live TTS proof is the CI
+  run on a 16 GB runner — see Continuous integration.
 - No real cloud brain has been called — the HTTP brain was proven only
   against a local mock server. A real provider needs a key.
 - No live microphone/speaker capture — WAV files (offline) and the null

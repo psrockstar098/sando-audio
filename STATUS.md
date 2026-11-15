@@ -4,7 +4,8 @@ Phase 5 (Developer Ecosystem, Production & Applications): **COMPLETE,
 builder-verified and VERIFIED INDEPENDENTLY BY D from a clean
 worktree**, 2026-11-15 — the last phase of the 5-phase roadmap. Built
 and tested on this VM (Zig 0.17.1, `-Dcpu=baseline`, `-j1`). Pushed
-by D after verification — origin/main is the Phase 5 head.
+by D after verification. Since then origin/main has moved on: audio.cpp
+0.9.5 (see below) and the CI workflow (see below).
 
 D re-ran everything from a clean worktree with a clean cache: `zig
 build` exit 0; test binary run directly from the repo root = **All
@@ -23,6 +24,33 @@ servers stopped afterwards; no dev servers left running.
 Builder's live numbers, also recorded: warmed ASR 1,112 ms; ModelHub
 install (300 MB, 201) + remove (200); all four SDK examples run green
 against the live server (C, JS, Python, Zig).
+
+## Continuous integration — LIVE 2026-11-15
+
+`.github/workflows/ci.yml` (commit `f9f9a11`, created through the
+GitHub web UI — the CLI token cannot create workflow files) runs on
+every push to main and on pull requests: ubuntu-24.04, 4 vCPU,
+16 GB RAM, 14 GB SSD. It builds audio.cpp v0.9.5 from source,
+builds the engine with `-Dcpu=baseline`, downloads the Moonshine
+ASR (300,622,464 bytes) and Qwen3-TTS base (1,991,217,728 bytes)
+models with byte-size checks, runs the full test suite from the
+repo root, checks `doctor` for `audio.cpp: linked (abi 0x300,
+build 0.9.5, 17 tasks, 148 families)`, then proves TTS end to
+end (`run --task tts` → WAV, transcribed back through ASR,
+checked for "sando"). Runs:
+https://github.com/psrockstar098/sando-audio/actions
+
+Run #1 started 2026-11-15 ~11:50 (in progress at the time of
+writing; the audio.cpp source build alone takes ~30–60 min).
+A one-time check is scheduled ~12:55 the same day to report the
+outcome.
+
+Scope, per Dominic: the CI run tests JUST THE ENGINE with the
+stock Qwen3-TTS base model. The real voice is the fine-tuned
+Qwen3-TTS-0.6B LoRA, which is not finished yet. Swapping it in
+later is a model-artifact/config change (the `[[models]]` entry
+in `config/sando.example.toml` + the download URL/size), not a
+workflow change. No LoRA-loading mechanism exists in the repo.
 
 ## audio.cpp 0.9.5 — LANDED 2026-11-15 (source build, after Phase 5 push)
 
@@ -52,7 +80,8 @@ commit (`de8f614`): `zig build` exit 0, test binary direct = **All
 126 tests passed**, doctor shows abi 0x300 / build 0.9.5 / 148
 families, and live ASR via the REST server transcribed "Hello, this
 is sandos speaking." (Moonshine, 5,116 ms first call). Pushed —
-origin/main is now the 0.9.5 head.
+origin/main was the 0.9.5 head at that point (the CI workflow commit
+followed — see above).
 
 ## Phase 5 verification summary (builder, this session)
 
@@ -80,7 +109,7 @@ origin/main is now the 0.9.5 head.
 | Python example live | `examples/python/talk.py` → same flow, exit 0 |
 | Zig example live | `examples/zig/` builds + runs → 0.5.0, identify kq 1.00, 2-turn conversation, history 4 |
 | Weights / dataset in git | none — `models/` gitignored; dataset read-only outside the repo |
-| audio.cpp version shipped | **0.9.3 prebuilt, NOT 0.9.5** (unchanged — the 0.9.5 source build remains an open follow-up) |
+| audio.cpp version shipped | **0.9.3 prebuilt at verification time** (0.9.5 landed right after — see the 0.9.5 section above) |
 
 ## Phase 5 modules (what landed)
 
@@ -168,10 +197,10 @@ origin/main is now the 0.9.5 head.
   destination — two files with the same basename collide.
 - **Install copy is slow**: ~33 s for 300 MB on this VM (byte
   streaming through the reader/writer interfaces, no progress).
-- **D's independent re-verification is still open**: the numbers
-  above are the builder's, from this tree. D verifies from a clean
-  worktree + clean cache before the push (test binary direct, live
-  server smoke, SDK examples), same as Phases 2–4.
+- **D's independent re-verification is DONE**: D re-ran everything
+  from a clean worktree + clean cache (test binary direct = All 126
+  tests passed; live server smoke; SDK examples) and pushed — see
+  the top of this file.
 
 ## How to verify from a clean checkout
 
