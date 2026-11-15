@@ -19,6 +19,10 @@ pub const doctor = @import("doctor.zig");
 pub const bench = @import("bench.zig");
 pub const vad = @import("vad.zig");
 pub const streaming = @import("streaming.zig");
+pub const audiosense = @import("audiosense.zig");
+pub const voicedna = @import("voicedna.zig");
+pub const cache = @import("cache.zig");
+pub const reflex = @import("reflex.zig");
 
 pub const version = "0.1.0";
 pub const version_string = "sando-audio 0.1.0 (Phase 1: Core Engine & Universal Runtime)";
@@ -41,4 +45,8 @@ test {
     _ = @import("bench.zig");
     _ = @import("vad.zig");
     _ = @import("streaming.zig");
+    _ = @import("audiosense.zig");
+    _ = @import("voicedna.zig");
+    _ = @import("cache.zig");
+    _ = @import("reflex.zig");
 }
