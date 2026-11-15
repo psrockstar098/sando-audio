@@ -12,10 +12,10 @@ const config = @import("config.zig");
 pub const ModelKind = config.ModelKind;
 
 pub const ModelRecord = struct {
-    /// Borrowed from the config — the config outlives the registry.
+    /// Owned by the registry's arena (copied at register time).
     name: []const u8,
     kind: ModelKind,
-    /// Borrowed from the config.
+    /// Owned by the registry's arena (copied at register time).
     path: []const u8,
     loaded: bool = false,
     size_bytes: u64 = 0,
@@ -68,8 +68,10 @@ pub const ModelRegistry = struct {
         return self.records.get(name);
     }
 
-    /// Register a model (or refresh an existing entry's size). Evicts
-    /// least-recently-used *unloaded* models while over either limit.
+    /// Register a model (or refresh an existing entry's size). Names and
+    /// paths are copied into the registry's arena — the registry never
+    /// borrows config strings. Evicts least-recently-used *unloaded*
+    /// models while over either limit.
     pub fn register(
         self: *ModelRegistry,
         name: []const u8,
@@ -87,14 +89,17 @@ pub const ModelRegistry = struct {
             // evictOne only ever fails with RegistryFull.
             self.evictOne() catch return error.RegistryFull;
         }
-        const rec = try self.arena.allocator().create(ModelRecord);
+        const a = self.arena.allocator();
+        const owned_name = try a.dupe(u8, name);
+        const owned_path = try a.dupe(u8, path);
+        const rec = try a.create(ModelRecord);
         rec.* = .{
-            .name = name,
+            .name = owned_name,
             .kind = kind,
-            .path = path,
+            .path = owned_path,
             .size_bytes = size_bytes,
         };
-        try self.records.put(name, rec);
+        try self.records.put(owned_name, rec);
         return rec;
     }
 

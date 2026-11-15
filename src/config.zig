@@ -237,9 +237,16 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
     };
 }
 
-/// Load and validate a config file.
+/// Load and validate a config file. Absolute paths are used as-is;
+/// relative paths resolve against the working directory.
 pub fn loadFromFile(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
-    const text = std.Io.Dir.cwd().readFileAlloc(io, alloc, path, .limited(1 << 20)) catch return error.ConfigFileNotFound;
+    const text = if (std.Io.Dir.path.isAbsolute(path)) blk: {
+        var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return error.ConfigFileNotFound;
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var reader = file.reader(io, &buf);
+        break :blk reader.interface.readAllocShort(alloc, 1 << 20) catch return error.ConfigFileNotFound;
+    } else std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1 << 20)) catch return error.ConfigFileNotFound;
     defer alloc.free(text);
     return parse(alloc, text);
 }

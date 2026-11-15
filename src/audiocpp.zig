@@ -96,7 +96,7 @@ const C = if (has_link) struct {
     extern "c" fn audiocpp_result_text(result: *const ResultHandle, out_text: ?*[*:0]const u8, out_language: ?*[*:0]const u8) c_int;
     extern "c" fn audiocpp_stream_policy(session: *const SessionHandle, out_input: ?*c_int, out_output: ?*c_int, out_chunk_samples: ?*i64, out_chunk_seconds: ?*f64) c_int;
     extern "c" fn audiocpp_stream_start(session: *SessionHandle, request: ?*const RequestHandle) c_int;
-    extern "c" fn audiocpp_stream_push(session: *SessionHandle, samples: [*]const f32, frames: usize, sample_rate: c_int, channels: c_int, start_sample: i64, out_event: ?**EventHandle) c_int;
+    extern "c" fn audiocpp_stream_push(session: *SessionHandle, samples: [*]const f32, frames: usize, sample_rate: c_int, channels: c_int, start_sample: i64, out_event: ?*?*EventHandle) c_int;
     extern "c" fn audiocpp_stream_finish(session: *SessionHandle, out_result: **ResultHandle) c_int;
     extern "c" fn audiocpp_stream_reset(session: *SessionHandle) c_int;
     extern "c" fn audiocpp_event_free(event: ?*EventHandle) void;
@@ -417,6 +417,12 @@ pub const Result = struct {
         return .{ .text = std.mem.span(t), .language = std.mem.span(l) };
     }
 };
+
+/// Free an event returned by streamPush. Events wrap results; freeing
+/// the event frees its result too.
+pub fn eventFree(event: *EventHandle) void {
+    if (comptime has_link) C.audiocpp_event_free(event);
+}
 
 test "abi version and task vocabulary (live when linked)" {
     if (comptime has_link) {

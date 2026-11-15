@@ -56,11 +56,13 @@ pub const Response = struct {
     }
 
     pub fn text(self: *Response) !struct { text: []const u8, language: []const u8 } {
-        return self.result.text();
+        const t = try self.result.text();
+        return .{ .text = t.text, .language = t.language };
     }
 
     pub fn audio(self: *Response) !struct { samples: []const f32, sample_rate: u32, channels: u8 } {
-        return self.result.audio();
+        const a = try self.result.audio();
+        return .{ .samples = a.samples, .sample_rate = a.sample_rate, .channels = a.channels };
     }
 
     /// Latency in milliseconds, for display and bench output.
@@ -168,19 +170,21 @@ pub const Session = struct {
 };
 
 /// The runtime: owns the audio.cpp registry and every loaded model.
-/// Model names are the config names; the map borrows the name strings
-/// (the config outlives the runtime — the engine guarantees this).
+/// Map keys are owned copies in `key_arena` — the runtime never borrows
+/// config strings, so a config reload cannot dangle it.
 pub const Runtime = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     registry: ?audiocpp.Registry = null,
     models: std.StringHashMap(audiocpp.Model),
+    key_arena: std.heap.ArenaAllocator,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) !Runtime {
         var rt = Runtime{
             .alloc = alloc,
             .io = io,
             .models = std.StringHashMap(audiocpp.Model).init(alloc),
+            .key_arena = std.heap.ArenaAllocator.init(alloc),
         };
         if (audiocpp.has_link) {
             rt.registry = try audiocpp.Registry.create(alloc, null);
@@ -192,6 +196,7 @@ pub const Runtime = struct {
         var it = self.models.valueIterator();
         while (it.next()) |m| m.deinit();
         self.models.deinit();
+        self.key_arena.deinit();
         if (self.registry) |*r| r.deinit();
         self.* = undefined;
     }
@@ -232,7 +237,13 @@ pub const Runtime = struct {
         const reg = &(self.registry orelse return error.AudioCppNotLinked);
         var loaded = try audiocpp.Model.load(self.alloc, reg, path, cfg);
         errdefer loaded.deinit();
-        if (try self.models.fetchPut(name, loaded)) |old| {
+        // Own the key: fetchPut keeps the existing key on replace, so
+        // only dupe when the name is new.
+        const key = if (self.models.contains(name))
+            name
+        else
+            try self.key_arena.allocator().dupe(u8, name);
+        if (try self.models.fetchPut(key, loaded)) |old| {
             var old_model = old.value;
             old_model.deinit();
         }

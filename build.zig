@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_mod.addOptions("build_options", options);
+    // The C API uses the C allocator; libc is always linked.
+    lib_mod.link_libc = true;
     linkAudiocpp(b, lib_mod, audiocpp_dir);
 
     const lib = b.addLibrary(.{
