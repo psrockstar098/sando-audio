@@ -1,11 +1,24 @@
 # SANDO Audio — Phase 4 STATUS
 
-Phase 4 (Liberian Language & Voice Intelligence): **COMPLETE, builder
-verification below**, 2026-11-15. Built and tested on this VM (Intel
-Xeon Platinum 8321HC, 4 cores, AVX-512, Ubuntu 24.04, glibc 2.39, Zig
-0.17.1). **NOT yet independently verified by D, NOT pushed** —
-origin/main is still the Phase 3 head (`52b5bab`); this tree is local
-only until D verifies and pushes.
+Phase 4 (Liberian Language & Voice Intelligence): **COMPLETE, builder-
+verified and VERIFIED INDEPENDENTLY BY D from a clean worktree**,
+2026-11-15. Built and tested on this VM (Intel Xeon Platinum 8321HC,
+4 cores, AVX-512, Ubuntu 24.04, glibc 2.39, Zig 0.17.1). Pushed by D
+after verification — origin/main is the Phase 4 head.
+
+D re-ran everything from a clean worktree with a clean cache: `zig
+build` exit 0; test binary direct = **All 109 tests passed, exit 0**;
+`language identify` "They fini fool we pekin them." → kq 1.00;
+`language vocab fini` → real cited entries; `language pronounce
+pekin` → attested form; `talk "I de go." --language kq` → Sando
+answers "I de go." verbatim; `language route` honest about no
+Koloqua ASR model; `language evaluate --limit 100` reproduced the
+per-language numbers exactly (kro 77, lom 69, mnk 74, gol 85, dnj
+100) and code-switch 8/100, precision 0.03, recall 0.08; `converse`
+with real Liberian English audio → exact transcription, en-lr
+detected, mock brain answered, `tts=unavailable`. D also confirmed
+the 840-attested count from the dataset file directly (840
+non-expansion + 10,940 expansion = 11,780).
 
 ## Phase 4 verification summary (builder, this session)
 
