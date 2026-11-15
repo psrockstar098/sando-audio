@@ -52,6 +52,9 @@ pub const Config = struct {
     backend: []const u8 = "auto",
     webgpu: bool = false,
     low_power: bool = false,
+    /// Operator system-prompt override (borrowed from the config
+    /// arena). Null = use the built-in Sando persona (persona.zig).
+    persona_prompt: ?[]const u8 = null,
     models: []ModelEntry = &.{},
 
     pub fn deinit(self: *Config) void {
@@ -91,10 +94,11 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
     var backend: []const u8 = "auto";
     var webgpu = false;
     var low_power = false;
+    var persona_prompt: ?[]const u8 = null;
     var models: std.ArrayList(ModelEntry) = .empty;
     defer models.deinit(a);
 
-    var section: enum { none, runtime, hardware, models } = .none;
+    var section: enum { none, runtime, hardware, persona, models } = .none;
     var cur: ?*ModelEntry = null;
     var seen_runtime_mode = false;
     var seen_sample_rate = false;
@@ -125,6 +129,8 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
                 section = .runtime;
             } else if (std.mem.eql(u8, name, "hardware")) {
                 section = .hardware;
+            } else if (std.mem.eql(u8, name, "persona")) {
+                section = .persona;
             } else {
                 return error.UnknownSection;
             }
@@ -167,6 +173,15 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
                     webgpu = try parseBool(raw_value);
                 } else if (std.mem.eql(u8, key, "low_power")) {
                     low_power = try parseBool(raw_value);
+                } else {
+                    return error.UnknownKey;
+                }
+            },
+            .persona => {
+                // The operator's system-prompt override. Optional:
+                // when absent the built-in Sando persona is used.
+                if (std.mem.eql(u8, key, "system_prompt")) {
+                    persona_prompt = try a.dupe(u8, try parseString(raw_value));
                 } else {
                     return error.UnknownKey;
                 }
@@ -233,6 +248,7 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
         .backend = backend,
         .webgpu = webgpu,
         .low_power = low_power,
+        .persona_prompt = persona_prompt,
         .models = try models.toOwnedSlice(a),
     };
 }
@@ -292,6 +308,9 @@ const example_config =
     \\webgpu = true
     \\low_power = true
     \\
+    \\[persona]
+    \\system_prompt = "You are Sando. Talk like a real person, not like a voice assistant. Speak natural Liberian English, warm, easy, and free-flowing. Use Koloqua words and expressions when they fit, the way people in Liberia actually talk. Keep it short, like something you would say out loud. One or two sentences is usually enough; say more only when the person really needs it. You can talk about anything. If the person is just chatting, chat back. Answer questions straight, react to what they say, and ask something back when it feels natural. Remember what was said earlier in this conversation and build on it. Never introduce yourself as a machine or an assistant, and never open with a stiff greeting or an offer to help. Just talk."
+    \\
     \\[[models]]
     \\name = "qwen3-tts-0.6b"
     \\kind = "tts"
@@ -325,6 +344,9 @@ test "parse example config" {
     try std.testing.expectEqualStrings("auto", cfg.backend);
     try std.testing.expect(cfg.webgpu);
     try std.testing.expectEqual(@as(usize, 3), cfg.models.len);
+    // The example ships the default persona as the override text.
+    try std.testing.expect(cfg.persona_prompt != null);
+    try std.testing.expect(std.mem.indexOf(u8, cfg.persona_prompt.?, "Talk like a real person") != null);
     try std.testing.expectEqualStrings("qwen3-tts-0.6b", cfg.models[0].name);
     try std.testing.expect(cfg.models[0].kind == .tts);
     try std.testing.expectEqualStrings("liberian-voice-01", cfg.models[0].voice.?);
@@ -333,6 +355,35 @@ test "parse example config" {
     const tts = try cfg.modelsOfKind(.tts, alloc);
     defer alloc.free(tts);
     try std.testing.expectEqual(@as(usize, 1), tts.len);
+}
+
+test "persona prompt is optional, unknown persona key rejected" {
+    const alloc = std.testing.allocator;
+    const no_persona =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\
+    ;
+    var cfg = try parse(alloc, no_persona);
+    defer cfg.deinit();
+    try std.testing.expect(cfg.persona_prompt == null);
+
+    const bad_key =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[persona]
+        \\tone = "pirate"
+        \\
+    ;
+    try std.testing.expectError(error.UnknownKey, parse(alloc, bad_key));
 }
 
 test "reject bad sample rate" {

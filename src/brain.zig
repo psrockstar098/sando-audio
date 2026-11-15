@@ -28,6 +28,7 @@
 //! `alloc` passed to `reply`).
 
 const std = @import("std");
+const persona = @import("persona.zig");
 
 /// One streamed reply chunk. The chunk is borrowed: a handler that
 /// keeps it must copy it before returning.
@@ -128,19 +129,24 @@ pub fn collectorChunk(ctx: *anyopaque, chunk: []const u8) anyerror!void {
 /// against the LAST user turn in the prompt (history never hijacks
 /// the match). Replies stream word by word so the streaming path is
 /// exercised exactly like a real brain's.
+///
+/// The replies follow the Sando persona (persona.zig): natural,
+/// free-flowing, a real person talking — never stiff
+/// assistant-speak. The Koloqua replies below are VERBATIM dataset
+/// sentences and stay exactly as attested.
 pub const MockBrain = struct {
     rules: []const Rule = &default_rules,
     default_reply: []const u8 = default_reply_text,
 
     pub const Rule = struct { needle: []const u8, reply: []const u8 };
 
-    pub const default_reply_text = "I heard you. I am Sando, your voice assistant. Ask me anything and I will answer in speech.";
+    pub const default_reply_text = "I hear you. So what's on your mind?";
 
     pub const default_rules = [_]Rule{
         .{ .needle = "joke", .reply = "Why did the developer go broke? Because he used up all his cache." },
-        .{ .needle = "what can you do", .reply = "I can listen to your voice, understand what you say, and answer back in speech. I speak English and I am learning Koloqua." },
-        .{ .needle = "hello", .reply = "Hello! I am Sando. Speak to me and I will answer." },
-        .{ .needle = "thank", .reply = "You are welcome. I am here whenever you want to talk." },
+        .{ .needle = "what can you do", .reply = "Oh, plenty. I listen, I talk back, I speak English and I'm picking up Koloqua. Try me, ask me anything." },
+        .{ .needle = "hello", .reply = "Hey! Good to hear you. What's going on?" },
+        .{ .needle = "thank", .reply = "Anytime. You know where to find me." },
         // Koloqua replies (Phase 4): each reply is a VERBATIM
         // dataset response, cited by id. The mock brain has no
         // Koloqua generative ability — outside these scripted
@@ -636,7 +642,15 @@ test "mock brain matches the last user turn, not history" {
     const prompt = "You are Sando.\nUser: tell me a joke\nAssistant: Why did the developer go broke? Because he used up all his cache.\nUser: what can you do\nAssistant:";
     const reply = try b.reply(alloc, std.testing.io, prompt, null, &collector, collectorChunk);
     defer alloc.free(reply);
-    try std.testing.expect(std.mem.indexOf(u8, reply, "listen to your voice") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "picking up Koloqua") != null);
+}
+
+test "mock brain replies never say the stiff lines" {
+    // Every scripted reply follows the persona: no banned phrase.
+    try std.testing.expect(!persona.containsBannedPhrase(MockBrain.default_reply_text));
+    for (MockBrain.default_rules) |rule| {
+        try std.testing.expect(!persona.containsBannedPhrase(rule.reply));
+    }
 }
 
 test "mock brain stops on cancel" {

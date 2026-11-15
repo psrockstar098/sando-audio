@@ -1389,6 +1389,9 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
         return 1;
     };
     defer conv.deinit();
+    // Operator persona override from the config; otherwise the
+    // built-in Sando persona (persona.zig) is the default.
+    if (eng.cfg.persona_prompt) |p| conv.session.system_prompt = p;
     conv.asr = &asr_session;
     if (tts_session) |*s| conv.tts = s;
     if (opts.cache) conv.cache = &smart_cache;

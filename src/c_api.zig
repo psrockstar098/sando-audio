@@ -716,7 +716,7 @@ test "c api conversation mock asks and remembers history" {
         return error.ConversationAskFailed;
     };
     defer sando_free_string(@constCast(reply));
-    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply), "Hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply), "Good to hear you") != null);
     // One ask = one user turn + one assistant turn in history.
     try std.testing.expectEqual(@as(usize, 2), sando_conversation_history_count(c));
 
@@ -724,7 +724,7 @@ test "c api conversation mock asks and remembers history" {
     const thanks: [:0]const u8 = "thank you";
     const reply2 = sando_conversation_ask(c, thanks.ptr) orelse return error.ConversationAskFailed;
     defer sando_free_string(@constCast(reply2));
-    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply2), "welcome") != null);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(reply2), "Anytime") != null);
     try std.testing.expectEqual(@as(usize, 4), sando_conversation_history_count(c));
     try std.testing.expect(sando_conversation_ask(null, hello.ptr) == null);
     try std.testing.expectEqual(@as(usize, 0), sando_conversation_history_count(null));

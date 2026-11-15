@@ -617,8 +617,14 @@ pub const Server = struct {
         errdefer self.alloc.destroy(mock);
         const conv = conversation.Conversation.init(self.alloc, self.io, mock.asBrain(), voice, lang_code) catch |err|
             return self.respondError(alloc, req, .internal, @errorName(err));
+        var conv_mut = conv;
+        // Operator persona override from the server config;
+        // otherwise the built-in Sando persona is the default.
+        if (self.eng) |*eng| {
+            if (eng.cfg.persona_prompt) |p| conv_mut.session.system_prompt = p;
+        }
         const entry = try self.alloc.create(SessionEntry);
-        entry.* = .{ .mock = mock, .conv = conv, .created_ms = models.nowMs(self.io) };
+        entry.* = .{ .mock = mock, .conv = conv_mut, .created_ms = models.nowMs(self.io) };
         const id = entry.conv.session.id;
         try self.sessions.put(id, entry);
         try self.session_order.append(self.alloc, id);
@@ -1144,7 +1150,7 @@ test "integration: live loopback server, no engine, no key" {
         const r = try testRequestRetry(alloc, io, port, req);
         defer alloc.free(r.body);
         try std.testing.expectEqual(@as(u16, 200), r.status);
-        try std.testing.expect(std.mem.indexOf(u8, r.body, "Hello! I am Sando") != null);
+        try std.testing.expect(std.mem.indexOf(u8, r.body, "Good to hear you") != null);
         try std.testing.expect(std.mem.indexOf(u8, r.body, "\"tts\":\"unavailable\"") != null);
     }
     {

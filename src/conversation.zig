@@ -31,6 +31,7 @@ const std = @import("std");
 const brain = @import("brain.zig");
 const cache = @import("cache.zig");
 const lang = @import("language.zig");
+const persona = @import("persona.zig");
 const reflex = @import("reflex.zig");
 const runtime = @import("runtime.zig");
 
@@ -59,6 +60,10 @@ pub const Session = struct {
     voice: []const u8,
     language: []const u8,
     history: std.ArrayList(Turn) = .empty,
+    /// System prompt override (borrowed — caller-owned). When null
+    /// the default Sando persona (persona.default_persona_prompt)
+    /// is used. Set from [persona] system_prompt in the config.
+    system_prompt: ?[]const u8 = null,
     /// Maximum turns kept; the oldest turn is evicted first.
     max_turns: usize = 20,
 
@@ -98,13 +103,18 @@ pub const Session = struct {
         }
     }
 
-    /// Render the prompt the brain sees: a short instruction, the
+    /// Render the prompt the brain sees: the system prompt (the
+    /// operator's override, else the default Sando persona), the
     /// history, and the trailing "Assistant:" cue. The last history
-    /// turn is the current user text.
+    /// turn is the current user text. Every brain path (mock, agent,
+    /// HTTP) receives this prompt, so the persona rides on every
+    /// turn — including the follow-up after a barge-in, which
+    /// re-renders it.
     pub fn renderPrompt(self: *const Session, alloc: std.mem.Allocator) ![]const u8 {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(alloc);
-        try out.appendSlice(alloc, "You are Sando, a voice assistant. Answer briefly, in plain spoken words.\n");
+        try out.appendSlice(alloc, self.system_prompt orelse persona.default_persona_prompt);
+        try out.append(alloc, '\n');
         // Phase 4: the session language shapes the instruction.
         // Unregistered codes add nothing (the prompt stays exactly
         // as Phase 3 wrote it).
@@ -614,6 +624,30 @@ test "session history evicts the oldest turn first" {
     try std.testing.expectEqual(@as(usize, 16), session.id.len);
 }
 
+test "session prompt carries the persona by default" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, std.testing.io, "v1", "en");
+    defer session.deinit();
+    try session.appendTurn(.user, "hello");
+    const prompt = try session.renderPrompt(alloc);
+    defer alloc.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Talk like a real person") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Liberian English") != null);
+    try std.testing.expect(!persona.containsBannedPhrase(prompt));
+}
+
+test "session prompt override replaces the persona" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, std.testing.io, "v1", "en");
+    defer session.deinit();
+    session.system_prompt = "You are a pirate. Answer like a pirate.";
+    try session.appendTurn(.user, "hello");
+    const prompt = try session.renderPrompt(alloc);
+    defer alloc.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "You are a pirate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Talk like a real person") == null);
+}
+
 test "session prompt renders history with roles" {
     const alloc = std.testing.allocator;
     var session = try Session.init(alloc, std.testing.io, "v1", "en");
@@ -698,7 +732,7 @@ test "text turn: mock brain replies, history grows, tts honestly skipped" {
     defer conv.deinit();
     var result = try conv.processText("hello");
     defer result.deinit(alloc);
-    try std.testing.expect(std.mem.indexOf(u8, result.reply, "Hello! I am Sando") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.reply, "Good to hear you") != null);
     try std.testing.expect(result.brain == .ran);
     // The greeting is 3 sentences; with no TTS session every one
     // is honestly skipped, never faked.
@@ -726,9 +760,9 @@ test "tts cache hit speaks without any session" {
     defer smart_cache.deinit();
     const samples = [_]f32{ 0.1, 0.2, 0.3 };
     // Pre-populate all three sentences of the mock greeting.
-    try smart_cache.putTts("v1", "en", "conversation", "Hello!", &samples, 24000, 1);
-    try smart_cache.putTts("v1", "en", "conversation", "I am Sando.", &samples, 24000, 1);
-    try smart_cache.putTts("v1", "en", "conversation", "Speak to me and I will answer.", &samples, 24000, 1);
+    try smart_cache.putTts("v1", "en", "conversation", "Hey!", &samples, 24000, 1);
+    try smart_cache.putTts("v1", "en", "conversation", "Good to hear you.", &samples, 24000, 1);
+    try smart_cache.putTts("v1", "en", "conversation", "What's going on?", &samples, 24000, 1);
 
     var mock = brain.MockBrain{};
     var conv = try Conversation.init(alloc, std.testing.io, mock.asBrain(), "v1", "en");

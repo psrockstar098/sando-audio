@@ -135,7 +135,7 @@ mock brain only — a real LLM brain is a library-level choice
 wire.
 
 `POST /v1/conversation/<id>/ask` `{"text":"hello"}` →
-`{"id":"...","transcript":"hello","reply":"Hello! I am Sando. Speak to me and I will answer.","asr":"skipped","brain":"ran","tts":"unavailable","barged_in":false,"turns":2,"partial_reply":null,"interrupt_text":null}`.
+`{"id":"...","transcript":"hello","reply":"Hey! Good to hear you. What's going on?","asr":"skipped","brain":"ran","tts":"unavailable","barged_in":false,"turns":2,"partial_reply":null,"interrupt_text":null}`.
 `asr`/`brain`/`tts` are leg statuses (`skipped`/`ran`/`unavailable`
 for text turns; `tts` is `unavailable` on this VM).
 

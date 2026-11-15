@@ -32,6 +32,7 @@ pub const voicedna = @import("voicedna.zig");
 pub const cache = @import("cache.zig");
 pub const reflex = @import("reflex.zig");
 pub const brain = @import("brain.zig");
+pub const persona = @import("persona.zig");
 pub const conversation = @import("conversation.zig");
 pub const language = @import("language.zig");
 pub const vocabulary = @import("vocabulary.zig");
@@ -68,6 +69,7 @@ test {
     _ = @import("cache.zig");
     _ = @import("reflex.zig");
     _ = @import("brain.zig");
+    _ = @import("persona.zig");
     _ = @import("conversation.zig");
     _ = @import("language.zig");
     _ = @import("vocabulary.zig");
