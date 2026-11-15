@@ -1,22 +1,28 @@
 # SANDO Audio — Phase 5 STATUS
 
 Phase 5 (Developer Ecosystem, Production & Applications): **COMPLETE,
-builder-verified, 2026-11-15** — the last phase of the 5-phase
-roadmap. Built and tested on this VM (Zig 0.17.1, `-Dcpu=baseline`,
-`-j1`). `zig build` exit 0; test binary run directly from the repo
-root = **All 126 tests passed, exit 0, no leaks** (was 109/109 — 17
-new Phase 5 tests). Live server verified end to end with curl:
-health, version (17 tasks), languages (11), identify kq 1.00, vocab
-+ pronounce with real cited dataset entries, route honest about no
-Koloqua ASR, full conversation lifecycle (create/ask/get/list/
-delete + 404 after delete), metrics with per-route counts, WebUI
-200, VAD energy segments, **real ASR live** ("Hello, this is sandos
-speaking.", first call 5,977 ms incl. model load, warmed 1,112 ms),
-**TTS honest 503** (1,898 MB model vs 672 MB free), auth 401 without
-a key / 200 with it, ModelHub install (300 MB, 201) + remove (200).
-All four SDK examples run green against the live server (C, JS,
-Python, Zig). D has NOT yet independently re-verified this phase
-from a clean worktree — that step is still open (see below).
+builder-verified and VERIFIED INDEPENDENTLY BY D from a clean
+worktree**, 2026-11-15 — the last phase of the 5-phase roadmap. Built
+and tested on this VM (Zig 0.17.1, `-Dcpu=baseline`, `-j1`). Pushed
+by D after verification — origin/main is the Phase 5 head.
+
+D re-ran everything from a clean worktree with a clean cache: `zig
+build` exit 0; test binary run directly from the repo root = **All
+126 tests passed, exit 0**. Live REST server (fresh binary, ports
+18230/18231): health ok, identify "They fini fool we pekin them."
+→ kq 1.00, conversation create ("en" → "en-lr") / ask (mock brain
+answered, `asr=skipped brain=ran tts=unavailable`) / get (history
+2 turns), metrics with per-route counts, WebUI 200 text/html,
+unknown route 404, ASR live via `/v1/infer` ("Hello, this is sandos
+speaking.", Moonshine, 3,970 ms first call), TTS honest 503, VAD
+energy segments, auth 401 without key / 401 wrong key / 200 right
+key, Python SDK example green against the live server (health,
+identify, conversation lifecycle, VAD, TTS 503, metrics), and `nm`
+confirms all 26 `sando_*` symbols in `libsando.a`. Both verification
+servers stopped afterwards; no dev servers left running.
+Builder's live numbers, also recorded: warmed ASR 1,112 ms; ModelHub
+install (300 MB, 201) + remove (200); all four SDK examples run green
+against the live server (C, JS, Python, Zig).
 
 ## Phase 5 verification summary (builder, this session)
 
