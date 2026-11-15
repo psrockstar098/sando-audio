@@ -167,6 +167,17 @@ pub const Session = struct {
     pub fn streamReset(self: *Session) !void {
         return self.inner.streamReset();
     }
+
+    /// The chunk schedule the family wants for this session.
+    pub fn streamPolicy(self: *Session) !audiocpp.StreamPolicy {
+        return self.inner.streamPolicy();
+    }
+
+    /// Pull the next queued stream event, or null when the queue is
+    /// empty. The caller frees the returned event handle.
+    pub fn streamNextEvent(self: *Session) !?*audiocpp.EventHandle {
+        return self.inner.streamNextEvent();
+    }
 };
 
 /// The runtime: owns the audio.cpp registry and every loaded model.

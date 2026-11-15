@@ -17,6 +17,8 @@ pub const c_api = @import("c_api.zig");
 pub const cli = @import("cli.zig");
 pub const doctor = @import("doctor.zig");
 pub const bench = @import("bench.zig");
+pub const vad = @import("vad.zig");
+pub const streaming = @import("streaming.zig");
 
 pub const version = "0.1.0";
 pub const version_string = "sando-audio 0.1.0 (Phase 1: Core Engine & Universal Runtime)";
@@ -37,4 +39,6 @@ test {
     _ = @import("cli.zig");
     _ = @import("doctor.zig");
     _ = @import("bench.zig");
+    _ = @import("vad.zig");
+    _ = @import("streaming.zig");
 }
