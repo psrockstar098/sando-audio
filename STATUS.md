@@ -52,6 +52,31 @@ later is a model-artifact/config change (the `[[models]]` entry
 in `config/sando.example.toml` + the download URL/size), not a
 workflow change. No LoRA-loading mechanism exists in the repo.
 
+## Persona: talk real out of the box — BUILT 2026-11-15
+
+Dominic ordered it ~11:46: the engine must not talk dumb or straight
+like other voice assistants — it should act real, natural, out of the
+conversation. Landed as the default brain prompt (code default in
+`src/persona.zig`, optional `[persona]` override in config): natural
+Liberian English, Koloqua where it fits, warm and free-flowing, short
+turns, chats about anything, asks follow-ups, remembers the thread.
+A banned-phrase tripwire (unit-tested) blocks "As an AI language
+model", "How can I help you", "I am Sando, your voice assistant" and
+similar stiff lines. Wired through `Session.renderPrompt`, the single
+choke point every brain path receives, so HttpBrain, AgentBrain and
+MockBrain all get it, re-rendered fresh on every turn including after
+a barge-in. MockBrain replies rewritten in persona style; Koloqua
+verbatim dataset replies untouched. Verified by D from a clean
+worktree of the landed commit: `zig build` exit 0, test binary
+direct = **All 132 tests passed** (126 + 6 new), live `converse`
+smoke with real speech — "Hello sando" → "Hey! Good to hear you.
+What's going on?", "I had a long day, just want to chat." → "I hear
+you. So what's on your mind?" (`asr=ran brain=ran tts=unavailable`,
+2 turns → 4 history turns). Honest limits: spoken TTS still can't
+run on this VM (needs the 16 GB CI runner or a GPU); whether a real
+LLM stays natural in persona can only be shown with a live brain
+model — the mock proves the plumbing, not the model.
+
 ## audio.cpp 0.9.5 — LANDED 2026-11-15 (source build, after Phase 5 push)
 
 The open follow-up from Phases 2–5 is CLOSED. The v0.9.5 release tag
