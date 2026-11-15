@@ -1,26 +1,36 @@
-# SANDO Audio — Phase 2: Real-Time Speech & Voice Intelligence
+# SANDO Audio — Phase 3: Intelligence & Conversational AI
 
 A real-time African voice intelligence engine, engineered in Zig,
 Liberia-first (Liberian English + Koloqua P0). This repository is the
 Zig orchestration/runtime layer over [audio.cpp](https://github.com/0xShug0/audio.cpp)
 via its public C ABI.
 
-Phase 2 is the voice layer: streaming ASR and TTS over the LiveStream
-Engine (full-duplex, barge-in), VAD, AudioSense, VoiceDNA, SmartCache,
-and ReflexEngine. Nothing is faked — when a backend or a model is
-missing, the engine says so instead of simulating success.
+Phase 3 is the conversation layer: BrainLink (mock, in-process agent,
+and OpenAI-compatible HTTP brains), streaming brain replies, incremental
+TTS generation, speech-to-brain-to-speech over the Phase 2 LiveStream
+Engine, conversation orchestration with bounded history, intelligent
+turn-taking, and interruption-aware barge-in (VoiceContinuum). Nothing
+is faked — when a backend or a model is missing, the engine says so
+instead of simulating success.
 
 ## Status
 
-Phase 2 is complete and verified on this machine. See [STATUS.md](STATUS.md)
-for the per-item checklist with exact verification results.
+Phase 3 is complete and builder-verified on this machine (D's
+independent verification pending before push). See
+[STATUS.md](STATUS.md) for the per-item checklist with exact
+verification results.
 
 - Zig 0.17.1, `-Dcpu=baseline` (portable binaries)
 - audio.cpp 0.9.3 prebuilt (ABI 0.2.0), 17 tasks, 133 model families
   (0.9.5 was ordered but did not land in Phase 2 — see STATUS.md)
-- 68 unit tests, all passing, no leaks
-- Live ASR verified with Moonshine-Streaming-small (287 MB): `run` and
-  `stream` over a WAV file complete end to end on the CPU backend
+- 91 unit tests, all passing, no leaks
+- Live `converse` verified with Moonshine-Streaming-small (287 MB):
+  real speech → exact transcript → mock brain reply; barge-in proven
+  live (reply cut short, interrupt transcribed, follow-up delivered);
+  multi-turn history and the SmartCache ASR leg proven live; the HTTP
+  brain proven live against a local mock server (no keys, no cloud)
+- TTS is still not runnable on this VM: the new size guard refuses the
+  1.9 GB model load honestly ("only ~577–1094 MB is free")
 - Library `libsando.a` + CLI `sando-audio` + C API + sample plugin
 
 ## Build
@@ -64,6 +74,11 @@ sando-audio run --task asr --wav in.wav --cache        # TTS/ASR result cache
 sando-audio run --task tts --text "Hello" --voice smoke-voice-01
 sando-audio stream --wav in.wav                        # LiveStream Engine: partials + VAD
 sando-audio vad --wav in.wav                           # model VAD, else labelled energy fallback
+sando-audio converse --wav turn.wav                    # speech-to-brain-to-speech, mock brain
+sando-audio converse --wav turn.wav --interrupt cut.wav  # barge-in: interrupt mid-reply
+sando-audio converse --wav a.wav --wav b.wav --cache   # multi-turn, SmartCache on both legs
+sando-audio converse --wav turn.wav --brain http --brain-url http://127.0.0.1:11434/v1/chat/completions
+                                                       # OpenAI-compatible brain, local only, no key
 sando-audio voices list
 sando-audio voices enroll-synthetic my-voice "My Voice"   # synthetic reference audio only
 sando-audio voices delete my-voice
@@ -99,6 +114,8 @@ src/
   voicedna.zig  voice profiles, consent-gated synthetic/bundled references
   cache.zig     SmartCache: voice/language/context-aware TTS + ASR cache
   reflex.zig    ReflexEngine: turn-end heuristic, speculative planner
+  brain.zig     BrainLink: mock, in-process agent, OpenAI-compatible HTTP brains
+  conversation.zig Session, sentence chunker, conversation orchestration, barge-in
 config/         sando.example.toml
 examples/       plugins/noop — sample passthrough plugin
                 test-tone.wav — 3 s test fixture (1 s 440 Hz tone)
@@ -119,13 +136,16 @@ docs/           API.md — library, C API, plugin ABI, config schema
   the model list requires a restart; backend and flag changes reload
   live. The engine refuses to dangle pointers instead of guessing.
 
-## What Phase 2 does NOT do (honest gaps)
+## What Phase 3 does NOT do (honest gaps)
 
 - TTS inference is NOT yet verified live: the Qwen3-TTS weight is
-  1.86 GiB and this VM has ~1 GB free while building, so a live TTS
-  run is expected to OOM (see STATUS.md). ASR is verified live.
+  1.86 GiB and this VM has ~0.6–1.1 GB free, so the new size guard
+  refuses the load instead of OOMing (see STATUS.md). ASR, the brain,
+  and barge-in are verified live.
+- No real cloud brain has been called — the HTTP brain was proven only
+  against a local mock server. A real provider needs a key.
 - No live microphone/speaker capture — WAV files (offline) and the null
-  device only. Real device I/O is Phase 3.
+  device only.
 - No WASM build verified — no emcc/emsdk on the build machine.
 - Enhancement (noise/echo) has NO dedicated model family in the linked
   audio.cpp build, so AudioSense reports it unavailable instead of

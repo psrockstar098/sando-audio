@@ -1,4 +1,73 @@
-# SANDO Audio — Phase 2 STATUS
+# SANDO Audio — Phase 3 STATUS
+
+Phase 3 (Intelligence & Conversational AI): **COMPLETE and
+builder-verified**, 2026-11-15. Built and tested on this VM
+(Intel Xeon Platinum 8321HC, 4 cores, AVX-512, Ubuntu 24.04, glibc 2.39,
+Zig 0.17.1). Local commits only until pushed — origin/main is still the
+Phase 2 head until D verifies independently and pushes.
+
+## Phase 3 verification summary (builder; D's independent verification pending)
+
+| Check | Result |
+|---|---|
+| `zig build -j1 -Dcpu=baseline` | clean, exit 0 |
+| `zig build test -j1 -Dcpu=baseline`, test binary run directly | **91/91 tests pass** (was 68/68), exit 0, **no leaks** |
+| CLI smoke (`version`, `doctor`) | 0.3.0 Phase 3; doctor correct (audio.cpp 0.9.3, 17 tasks, 133 families) |
+| Live `converse` (Moonshine-Streaming-small, 287 MB, CPU; mock brain) | **PROVEN with real speech**: "Hello, this is Sando speaking." → transcribed exactly, mock brain answered "Hello! I am Sando. Speak to me and I will answer." (~9.5 s for the whole turn, model load included) |
+| Live barge-in (`converse --interrupt`) | **PROVEN**: reply cut short at "Hello!", interrupt transcribed live ("Tell me a joke instead."), follow-up joke delivered, 1 barge-in, 4 history turns |
+| Live multi-turn + cache | 2 turns, history grows to 4; repeat of the same audio reports `asr=cached` (SmartCache leg proven live) |
+| Live `--brain http` (local mock HTTP brain on 127.0.0.1:18080) | **PROVEN**: OpenAI-compatible SSE reply streamed through the real `std.http` transport; unconsumed interrupt ran as a final turn, as designed |
+| TTS (Qwen3-TTS-0.6B-Q8_0, 1.9 GB) | **Still not runnable on this VM** — the new size guard refuses the load honestly: "tts skipped: model qwen3-tts-0.6b is 1898 MB but only ~577–1094 MB is free — this machine cannot load it" (free RAM varies run to run) |
+| C API conversation entry points | present: `sando_conversation_create_mock`, `sando_conversation_create_agent`, `sando_conversation_ask`, `sando_conversation_history_count`, `sando_conversation_destroy` (22 exports total) |
+| Weights in git | none — `models/` (2.3 GB) and `voices/` are gitignored; tree clean |
+| audio.cpp version shipped | **0.9.3 prebuilt, NOT 0.9.5** — the 0.9.5 source build remains an open follow-up (see Phase 2 section) and was NOT attempted in Phase 3 |
+
+## Phase 3 modules (what landed)
+
+- BrainLink (`src/brain.zig`): `Brain` vtable (streaming chunks +
+  cancel), `MockBrain` (scripted replies), `AgentBrain` (in-process
+  host callback), `HttpBrain` (OpenAI-compatible chat completions over
+  `std.http`, SSE parser, pluggable transport). **No Authorization
+  header is ever sent** — the HTTP brain only talks to a local or
+  otherwise unauthenticated endpoint. No keys, no real cloud calls.
+- Conversation orchestration (`src/conversation.zig`): `Session`
+  (bounded history, oldest evicted first, in-memory only),
+  `SentenceChunker` (incremental, 200-char runs), `Conversation`
+  (listen → transcribe → think → speak → listen, SmartCache on both
+  legs, ReflexEngine turn-end gating, barge-in mid-reply with
+  partial-reply + follow-up in history).
+- CLI `converse` (`src/cli.zig`): repeatable `--wav`, `--interrupt`,
+  `--brain mock|http`, `--brain-url`, `--brain-model`, `--voice`,
+  `--language`, `--cache`, `--out-dir` (default `converse-out`,
+  `turn<N>-sent<M>.wav`). VAD segments each file (energy fallback,
+  labelled); segments group into turns on silence gaps via the
+  turn-end probability. TTS model size guard from `/proc/meminfo`.
+- C API conversation entry points (`src/c_api.zig`): mock + agent
+  (host C callback, `callconv(.c)`, reply copied by the library).
+- Version bump 0.2.0 → 0.3.0 (`src/root.zig`, `src/c_api.zig`, CLI
+  usage).
+
+## Phase 3 honest gaps
+
+1. **TTS leg not verified live** (unchanged) — the guard proves the
+   load is refused, but no TTS audio has ever been produced on this
+   VM. Needs a machine with room for the 2 GB model (Dominic's
+   laptop) and a real enrolled voice.
+2. **No real cloud brain has been called** — the HTTP brain was proven
+   only against a local mock server. A real provider needs a key and
+   is Dominic's call, not this phase's.
+3. **No live mic/speaker** (unchanged from Phase 1) — WAV + null
+   device only.
+4. **No silero-vad weights on disk** — VAD works via the honest energy
+   fallback.
+5. **No WASM build** (unchanged).
+6. **audio.cpp 0.9.5 not landed** (see Phase 2 section).
+7. **Abbreviation heuristic**: the sentence splitter cuts "Dr." early
+   (documented in code) — acceptable for speech, not for prose.
+
+---
+
+# SANDO Audio — Phase 2 STATUS (kept below for the record)
 
 Phase 2 (Real-Time Speech & Voice Intelligence): **COMPLETE and verified
 by D from a clean worktree**, 2026-11-15. Built and tested on this VM

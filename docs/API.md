@@ -1,4 +1,4 @@
-# SANDO Audio — API Reference (Phase 2)
+# SANDO Audio — API Reference (Phase 3)
 
 Zig 0.17.1. Library `sando` (`libsando.a`), CLI `sando-audio`, C API
 (`src/c_api.zig`), plugin ABI (`src/plugin.zig`).
@@ -268,6 +268,69 @@ pub fn smartTurnAvailable(families: []const []const u8) bool
 threshold + terminal punctuation floor 0.7 at ≥200 ms + stable last
 word +0.1), labelled as such, not a model score.
 
+### brain (`src/brain.zig`) — BrainLink
+
+```zig
+pub const Brain = struct { // vtable: reply(alloc, io, prompt, cancel, chunk_ctx, on_chunk) ![]const u8; name(); deinit(alloc)
+    pub fn reply(self: Brain, alloc: Allocator, io: Io, prompt: []const u8, cancel: ?*const bool, chunk_ctx: *anyopaque, on_chunk: ChunkFn) ![]const u8 // streams chunks via on_chunk, returns the owned full reply
+};
+pub const ChunkFn = *const fn (ctx: *anyopaque, chunk: []const u8) anyerror!void;
+pub const MockBrain = struct { // scripted rules, matched case-insensitively against the LAST user turn
+    pub fn asBrain(self: *MockBrain) Brain
+};
+pub const AgentBrain = struct { // in-process host callback; the host owns cancellation/streaming
+    ctx: *anyopaque, callback: AgentCallback,
+    pub fn asBrain(self: *AgentBrain) Brain
+};
+pub const HttpBrain = struct { // OpenAI-compatible chat completions, POST /v1/chat/completions, stream: true
+    pub fn init(url: []const u8, model: []const u8, sender: Sender) HttpBrain
+    pub fn asBrain(self: *HttpBrain) Brain
+};
+pub const Sender = struct { // pluggable transport; StdHttpSender is the real one (std.http.Client)
+    pub fn send(self: Sender, alloc: Allocator, io: Io, url: []const u8, body: []const u8, bytes_ctx: *anyopaque, on_bytes: BytesFn) !void
+};
+pub const SseParser = struct { // incremental SSE: split feeds, data: [DONE], :ping keepalives, plain-JSON fallback
+    pub fn feed(self: *SseParser, bytes: []const u8, ctx: *anyopaque, on_content: *const fn (ctx: *anyopaque, content: []const u8) anyerror!void) !void
+    pub fn finish(self: *SseParser, ctx: *anyopaque, on_content: ...) !void
+};
+pub fn buildChatRequest(alloc: Allocator, model: []const u8, prompt: []const u8) ![]const u8 // {"model","messages":[{"role":"user","content":prompt}],"stream":true,"temperature":0.7}
+```
+
+**No Authorization header is ever sent** by the HTTP brain, so it
+only talks to a local or otherwise unauthenticated OpenAI-compatible
+endpoint. No keys, no real cloud calls in this phase.
+
+### conversation (`src/conversation.zig`)
+
+```zig
+pub const Session = struct { // id (16 hex chars), voice, language, bounded history (max_turns = 20, oldest evicted first)
+    pub fn init(alloc: Allocator, io: Io, voice: []const u8, language: []const u8) !Session
+    pub fn renderPrompt(self: *const Session, alloc: Allocator) ![]const u8 // instruction + "User: .../Assistant: ..." history
+};
+pub fn splitSentences(alloc: Allocator, text: []const u8) ![][]const u8 // boundaries at . ? ! + whitespace; runs > 200 chars cut at the last space; "Dr." splits early (documented heuristic)
+pub const SentenceChunker = struct { // incremental: feed() emits closed sentences as they arrive, finish() flushes the tail
+    pub fn feed(self: *SentenceChunker, text: []const u8, ctx: *anyopaque, on_sentence: *const fn (ctx: *anyopaque, sentence: []const u8) anyerror!void) !void
+};
+pub const LegStatus = enum { skipped, ran, cached, unavailable };
+pub const TurnResult = struct { transcript, reply, partial_reply: ?[]const u8, interrupt_text: ?[]const u8, asr, brain, tts: LegStatus, sentences_spoken, sentences_from_cache, sentences_skipped, tts_out_errors, barged_in: bool };
+pub const InterruptFn = *const fn (ctx: *anyopaque) ?[]const u8; // polled after each spoken sentence while streaming
+pub const TtsAudioFn = *const fn (ctx: *anyopaque, sentence: []const u8, samples: []const f32, sample_rate: u32, channels: u8) anyerror!void;
+pub const Conversation = struct { // owns session; borrows brain + optional ASR/TTS sessions + SmartCache
+    asr: ?*runtime.Session, tts: ?*runtime.Session, cache: ?*cache.SmartCache,
+    turn_end_threshold: f32 = 0.6, echo: ?*Io.Writer, interrupt_fn: ?InterruptFn, on_tts_audio: ?TtsAudioFn,
+    pub fn init(alloc: Allocator, io: Io, brain_value: Brain, voice: []const u8, language: []const u8) !Conversation
+    pub fn processText(self: *Conversation, user_text: []const u8) !TurnResult // empty text calls no brain
+    pub fn processAudio(self: *Conversation, samples: []const f32, sample_rate: u32, channels: u8) !TurnResult // ASR (cache first) -> brain -> TTS per sentence (cache first)
+    pub fn shouldReply(self: *const Conversation, silence_ms: u32, threshold_ms: u32, partial_text: []const u8, last_word_stable: bool) bool // reflex.turnEndProbability >= threshold
+};
+```
+
+Turn flow is listen → transcribe → think → speak → listen. A
+barge-in cancels the reply mid-stream (`error.Cancelled`): the
+partial reply stays in history, the interruption becomes a new user
+turn, and the brain answers it as a follow-up — multi-turn context
+survives. TTS errors are recorded (`tts_out_errors`), never fatal.
+
 ### audio (`src/audio.zig`)
 
 ```zig
@@ -314,7 +377,8 @@ int   sando_engine_load_model(void *engine, const char *name, const char *kind, 
 int   sando_config_validate(const char *path);     // 0 ok, -1 on error
 ```
 
-All string returns point at memory owned by the engine; do not free.
+All string returns point at memory owned by the engine, except the
+ones marked owned below — those are freed with `sando_free_string`.
 `sando_last_error` reports the last failure as a short string.
 
 Phase 2 inference entry points (each takes the model name and
@@ -329,6 +393,21 @@ char *sando_stream_push(void *stream, const float *samples, size_t frames, unsig
 char *sando_stream_finish(void *stream); // final text
 void  sando_stream_destroy(void *stream);
 void  sando_free_string(char *s);
+```
+
+Phase 3 conversation entry points. A conversation is one session
+(bounded history, in-memory only) plus a brain, and borrows the
+engine's Io — destroy it before the engine. No ASR/TTS session is
+attached here, so the TTS leg reports skipped; the full audio
+pipeline lives in the `converse` CLI command.
+
+```c
+typedef const char *(*sando_agent_reply_fn)(void *ctx, const char *prompt); // return a reply, or NULL on failure; the library copies it
+void *sando_conversation_create_mock(void *engine, const char *voice, const char *language); // scripted brain; voice/language may be NULL ("v1"/"en")
+void *sando_conversation_create_agent(void *engine, void *ctx, sando_agent_reply_fn cb, const char *voice, const char *language); // host callback brain; cb must not be NULL
+char *sando_conversation_ask(void *conversation, const char *text); // one text turn -> owned reply; free with sando_free_string
+size_t sando_conversation_history_count(void *conversation); // 2 per ask (user + assistant); 0 for NULL
+void  sando_conversation_destroy(void *conversation);
 ```
 
 ## Plugin ABI (`src/plugin.zig`)
@@ -367,6 +446,9 @@ sando-audio run [--config <path>] [--model <name>] [--task asr|tts|vad]
                 [--out <out.wav>] [--cache] [--voice <name>]
 sando-audio stream [--config <path>] [--wav <in.wav>] [--cache]
 sando-audio vad [--config <path>] [--wav <in.wav>]
+sando-audio converse [--config <path>] [--wav <turn.wav> ...] [--interrupt <in.wav>]
+                     [--brain mock|http] [--brain-url <url>] [--brain-model <name>]
+                     [--voice <name>] [--language <lang>] [--cache] [--out-dir <dir>]
 sando-audio voices list
 sando-audio voices enroll-synthetic <id> <name> [--language <lang>]
 sando-audio voices delete <id>
@@ -381,4 +463,12 @@ sando-audio plugins load --manifest <path>
 Exit codes: 0 ok, 1 runtime failure, 2 usage error. `run` with TTS
 writes a PCM16 WAV (default `out.wav`); ASR/VAD need `--wav`.
 `bench` always runs the memory bench; the inference bench is skipped
-with a plain message when no model/session can start.
+with a plain message when no model/session can start. `converse`
+runs speech-to-brain-to-speech over WAV files: each `--wav` is VAD
+segmented (energy fallback, labelled), segments group into turns on
+silence gaps via the turn-end probability, the brain streams live,
+and spoken TTS audio lands in `--out-dir` (`turn<N>-sent<M>.wav`).
+The TTS model is not loaded when its file exceeds free memory
+(`/proc/meminfo`) — the leg is skipped honestly instead of OOMing.
+An `--interrupt` file is transcribed on the first poll mid-reply
+(barge-in); if never consumed it runs as a final normal turn.
