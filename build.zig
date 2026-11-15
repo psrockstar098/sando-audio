@@ -77,7 +77,23 @@ pub fn build(b: *std.Build) void {
 
     const lib_tests = b.addTest(.{ .root_module = test_mod });
 
+    // Sample plugin: a passthrough .so proving the loader end to end.
+    // Installed to zig-out/lib so the test (and `plugins list`) can load it.
+    const plugin_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    plugin_mod.addCSourceFile(.{ .file = b.path("examples/plugins/noop/noop.c") });
+    const noop_plugin = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "sando-plugin-noop",
+        .root_module = plugin_mod,
+    });
+    const install_noop = b.addInstallArtifact(noop_plugin, .{});
+
     const run_tests = b.addRunArtifact(lib_tests);
+    run_tests.step.dependOn(&install_noop.step);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 }

@@ -216,3 +216,24 @@ test "process on an unloaded plugin fails honestly" {
     try std.testing.expectError(error.NotLoaded, mgr.process("ghost", &samples, 24000, 1));
     try std.testing.expectError(error.NotLoaded, mgr.unload("ghost"));
 }
+
+test "load and run the noop sample plugin" {
+    // The build installs the sample plugin to zig-out/lib before the
+    // test binary runs. Skipped when it is not there (plain `zig test`).
+    const path = "zig-out/lib/libsando-plugin-noop.so";
+    if (std.Io.Dir.cwd().access(std.testing.io, path, .{})) |_| {} else |_| return;
+    const alloc = std.testing.allocator;
+    var mgr = PluginManager.init(alloc);
+    defer mgr.deinit();
+    const loaded = try mgr.load(path);
+    try std.testing.expectEqualStrings("noop", loaded.name);
+    try std.testing.expect(loaded.kind == .effect);
+    try std.testing.expectEqualStrings("0.1.0", std.mem.span(loaded.descriptor.version));
+    var samples = [_]f32{ 0.5, -0.5, 0.25 };
+    try mgr.process("noop", &samples, 24000, 1);
+    // Passthrough: samples unchanged.
+    try std.testing.expectEqual(@as(f32, 0.5), samples[0]);
+    try std.testing.expectEqual(@as(f32, -0.5), samples[1]);
+    try mgr.unload("noop");
+    try std.testing.expectEqual(@as(usize, 0), mgr.count());
+}

@@ -1,0 +1,38 @@
+# SANDO Audio — example configuration.
+# Copy to config/sando.toml and point the model files at real weights
+# on disk. The engine NEVER downloads weights.
+#
+#   cp config/sando.example.toml config/sando.toml
+#   sando-audio config validate config/sando.toml
+#   sando-audio doctor
+
+[runtime]
+mode = "realtime"        # "realtime" | "offline"
+sample_rate = 24000      # Hz; one of 8000, 16000, 22050, 24000, 32000, 44100, 48000
+channels = 1             # 1 (mono) | 2 (stereo)
+
+[hardware]
+backend = "auto"         # "auto" | "cpu" | "cuda" | "hip" | "metal" | "vulkan" | "sycl" | "webgpu"
+webgpu = true            # prefer WebGPU when it is the selected backend
+low_power = true         # prefer low-power devices
+
+[[models]]
+name = "qwen3-tts-0.6b"
+kind = "tts"             # "tts" | "stt" | "vad"
+file = "models/qwen3-tts-0.6b-q8_0.gguf"
+voice = "liberian-voice-01"
+streaming = true
+language = "en"
+
+[[models]]
+name = "whisper-small"
+kind = "stt"
+file = "models/whisper-small-q8_0.gguf"
+streaming = true
+language = "auto"
+
+[[models]]
+name = "silero-vad"
+kind = "vad"
+file = "models/silero_vad.onnx"
+streaming = false

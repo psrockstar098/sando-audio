@@ -266,18 +266,19 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
         .plugins_list => |p| {
             var mgr = plugin.PluginManager.init(alloc);
             defer mgr.deinit();
-            var dir = std.Io.Dir.cwd().openDir(io, p.dir, .{}) catch {
+            const names = listPluginFiles(io, alloc, p.dir) catch {
                 try out.print("no plugins directory at {s}\n", .{p.dir});
                 try out.flush();
                 return 0;
             };
-            defer dir.close(io);
-            var iter = dir.iterate();
+            defer {
+                for (names) |n| alloc.free(n);
+                alloc.free(names);
+            }
             var found = false;
-            while (iter.next(io) catch null) |entry| {
-                if (!std.mem.endsWith(u8, entry.name, ".so")) continue;
+            for (names) |name| {
                 found = true;
-                const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ p.dir, entry.name });
+                const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ p.dir, name });
                 if (mgr.load(path)) |loaded| {
                     try out.print("  {s} [{s}] {s} — loads OK\n", .{
                         std.mem.span(loaded.descriptor.name),
@@ -286,7 +287,7 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
                     });
                     mgr.unload(loaded.name) catch {};
                 } else |err| {
-                    try out.print("  {s} — does not load ({t})\n", .{ entry.name, err });
+                    try out.print("  {s} — does not load ({t})\n", .{ name, err });
                 }
             }
             if (!found) try out.print("no .so plugins in {s}\n", .{p.dir});
@@ -313,6 +314,21 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
     }
 }
 
+/// Lists the .so files in a directory. The directory MUST be opened with
+/// `.iterate = true` — without it the OS handle is O_PATH and iterating
+/// panics with BADF (caught by the smoke test 2026-11-15).
+fn listPluginFiles(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) ![][]const u8 {
+    var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var out = std.ArrayList([]const u8).empty;
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".so")) continue;
+        try out.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
 fn loadEngine(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !engine.Engine {
     const cfg = try config.loadFromFile(alloc, io, path);
     return engine.Engine.init(alloc, io, cfg);
@@ -332,6 +348,16 @@ fn pickModel(cfg: *const config.Config, wanted: ?[]const u8, task: runtime.TaskK
 }
 
 fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOpts) !u8 {
+    // Usage checks before the engine starts, so a missing --text/--wav is
+    // a usage error (2), not a runtime failure (1).
+    if (opts.task == .tts and opts.text == null) {
+        std.debug.print("tts needs --text \"...\"\n", .{});
+        return 2;
+    }
+    if (opts.task != .tts and opts.wav_in == null) {
+        std.debug.print("{s} needs --wav in.wav\n", .{@tagName(opts.task)});
+        return 2;
+    }
     var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
         std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
         return 1;
@@ -517,4 +543,23 @@ test "parseArgs rejects bad input" {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "run", "--task", "telepathy" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "bench", "--iterations", "0" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "config", "validate" }));
+}
+
+test "listPluginFiles lists .so files in a real directory" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.so", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.so", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "x" });
+    const path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(path);
+    const names = try listPluginFiles(io, alloc, path);
+    defer {
+        for (names) |n| alloc.free(n);
+        alloc.free(names);
+    }
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectError(error.FileNotFound, listPluginFiles(io, alloc, ".zig-cache/tmp/does-not-exist"));
 }

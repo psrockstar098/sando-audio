@@ -1,0 +1,14 @@
+# Plugin manifest for the noop sample plugin.
+#
+# NOTE (Phase 1): the loader reads the plugin's `sando_plugin` descriptor
+# from the .so itself, not this file. This manifest is the intended
+# format for the plugin registry (model hub style): name, version, kind,
+# and where the library lives. Registry support for manifests lands in a
+# later phase; for now it documents the plugin next to its source.
+
+[plugin]
+name = "noop"
+version = "0.1.0"
+kind = "effect"
+file = "libsando-plugin-noop.so"
+description = "Passthrough plugin proving the loader works."

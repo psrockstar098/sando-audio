@@ -41,6 +41,24 @@ pub const DoctorReport = struct {
 /// Collect the report. Allocates; call `deinit` when done. Sections that
 /// cannot be probed report empty/zero with a reason in the printed
 /// output, never an error return (except OutOfMemory).
+/// Counts weight files (.gguf / .onnx) in a directory. The directory MUST
+/// be opened with `.iterate = true` — without it the OS handle is O_PATH
+/// and iterating panics with BADF (caught by the smoke test 2026-11-15).
+fn countModelFiles(io: std.Io, dir_path: []const u8) usize {
+    const dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return 0;
+    var d = dir;
+    defer d.close(io);
+    var it = d.iterate();
+    var n: usize = 0;
+    while (it.next(io) catch null) |entry| {
+        const name = entry.name;
+        if (std.mem.endsWith(u8, name, ".gguf") or std.mem.endsWith(u8, name, ".onnx")) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
 pub fn collect(alloc: std.mem.Allocator, io: std.Io) !DoctorReport {
     var cpu_model: []const u8 = try alloc.dupe(u8, "unknown");
     errdefer alloc.free(cpu_model);
@@ -84,17 +102,7 @@ pub fn collect(alloc: std.mem.Allocator, io: std.Io) !DoctorReport {
     } else |_| {}
 
     var model_files: usize = 0;
-    if (std.Io.Dir.cwd().openDir(io, "models", .{})) |*dir| {
-        var d = dir.*;
-        defer d.close(io);
-        var it = d.iterate();
-        while (it.next(io) catch null) |entry| {
-            const name = entry.name;
-            if (std.mem.endsWith(u8, name, ".gguf") or std.mem.endsWith(u8, name, ".onnx")) {
-                model_files += 1;
-            }
-        }
-    } else |_| {}
+    model_files = countModelFiles(io, "models");
 
     return .{
         .zig_version = builtin.zig_version_string,
@@ -175,4 +183,18 @@ test "doctor collects on this machine" {
         try std.testing.expectEqual(@as(usize, 17), report.audiocpp_tasks);
         try std.testing.expect(report.audiocpp_families > 0);
     }
+}
+
+test "countModelFiles counts weights in a real directory" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.gguf", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.onnx", .data = "x" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "x" });
+    const path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(path);
+    try std.testing.expectEqual(@as(usize, 2), countModelFiles(io, path));
+    try std.testing.expectEqual(@as(usize, 0), countModelFiles(io, ".zig-cache/tmp/does-not-exist"));
 }
