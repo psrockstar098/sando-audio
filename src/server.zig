@@ -32,6 +32,7 @@ const models = @import("models.zig");
 const audio = @import("audio.zig");
 const brain = @import("brain.zig");
 const conversation = @import("conversation.zig");
+const pulse = @import("pulse.zig");
 const language = @import("language.zig");
 const vocabulary = @import("vocabulary.zig");
 const pronunciation = @import("pronunciation.zig");
@@ -56,11 +57,17 @@ pub const ServerOptions = struct {
 
 /// One live conversation session: a heap-allocated MockBrain (the
 /// Conversation's brain vtable points at it, so it must outlive the
-/// Conversation) plus the Conversation itself.
+/// Conversation) plus the Conversation itself. The Pulse client
+/// also lives here: it borrows the entry's own sender and the
+/// engine config's Pulse URL, and the Conversation borrows the
+/// client — all three outlive the session because the entry is
+/// heap-allocated and stable until eviction or deletion.
 const SessionEntry = struct {
     mock: *brain.MockBrain,
     conv: conversation.Conversation,
     created_ms: i64,
+    pulse_sender: pulse.StdHttpSender,
+    pulse_client: pulse.PulseClient,
 
     fn deinit(self: *SessionEntry, alloc: std.mem.Allocator) void {
         self.conv.deinit();
@@ -624,7 +631,26 @@ pub const Server = struct {
             if (eng.cfg.persona_prompt) |p| conv_mut.session.system_prompt = p;
         }
         const entry = try self.alloc.create(SessionEntry);
-        entry.* = .{ .mock = mock, .conv = conv_mut, .created_ms = models.nowMs(self.io) };
+        entry.* = .{
+            .mock = mock,
+            .conv = conv_mut,
+            .created_ms = models.nowMs(self.io),
+            .pulse_sender = .{},
+            // Set below, once the entry exists: the client borrows
+            // the entry's own sender.
+            .pulse_client = undefined,
+        };
+        // Pulse knowledge for this session: the [pulse] config
+        // section when the server has an engine, off otherwise
+        // (health/version/text conversation still work without
+        // one). The client is disabled by default here and only
+        // enabled from the config, so a server started without an
+        // engine never tries to reach Pulse.
+        entry.pulse_client = pulse.PulseClient.init("http://127.0.0.1:9000", false, entry.pulse_sender.asSender());
+        if (self.eng) |*eng| {
+            entry.pulse_client = pulse.PulseClient.init(eng.cfg.pulse.url, eng.cfg.pulse.enabled, entry.pulse_sender.asSender());
+        }
+        entry.conv.pulse = &entry.pulse_client;
         const id = entry.conv.session.id;
         try self.sessions.put(id, entry);
         try self.session_order.append(self.alloc, id);
@@ -683,6 +709,9 @@ pub const Server = struct {
             .asr = @tagName(result.asr),
             .brain = @tagName(result.brain),
             .tts = @tagName(result.tts),
+            .pulse = @tagName(result.pulse),
+            .pulse_note = result.pulse_note,
+            .pulse_context = result.pulse_context,
             .barged_in = result.barged_in,
             .turns = entry.conv.session.turnCount(),
             .partial_reply = result.partial_reply,
@@ -912,12 +941,17 @@ pub const Server = struct {
             .mode = .offline,
             .text = speak,
             .language = lang,
+            .voice = tts_model.voice,
         };
-        var resp = tts_session.run(self.io, alloc, request) catch |err|
-            return self.respondError(alloc, req, .internal, @errorName(err));
+        var resp = tts_session.run(self.io, alloc, request) catch |err| {
+            const msg = try std.fmt.allocPrint(alloc, "tts inference failed ({t})", .{err});
+            return self.respondError(alloc, req, .tts_unavailable, msg);
+        };
         defer resp.deinit();
-        const a = resp.audio() catch |err|
-            return self.respondError(alloc, req, .internal, @errorName(err));
+        const a = resp.audio() catch |err| {
+            const msg = try std.fmt.allocPrint(alloc, "tts produced no audio ({t})", .{err});
+            return self.respondError(alloc, req, .tts_unavailable, msg);
+        };
         const wav_bytes = try audio.writeWav(alloc, a.samples, a.sample_rate, a.channels, .pcm16);
         try req.respond(wav_bytes, .{
             .status = .ok,

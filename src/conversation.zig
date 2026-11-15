@@ -32,6 +32,7 @@ const brain = @import("brain.zig");
 const cache = @import("cache.zig");
 const lang = @import("language.zig");
 const persona = @import("persona.zig");
+const pulse = @import("pulse.zig");
 const reflex = @import("reflex.zig");
 const runtime = @import("runtime.zig");
 
@@ -64,6 +65,12 @@ pub const Session = struct {
     /// the default Sando persona (persona.default_persona_prompt)
     /// is used. Set from [persona] system_prompt in the config.
     system_prompt: ?[]const u8 = null,
+    /// Knowledge fetched from Sando Pulse for the current turn
+    /// (owned — set by the Conversation before renderPrompt,
+    /// cleared when the turn ends). Rendered between the system
+    /// prompt and the history so the brain sees it as context,
+    /// clearly labelled as Pulse knowledge, not settled fact.
+    knowledge_context: ?[]const u8 = null,
     /// Maximum turns kept; the oldest turn is evicted first.
     max_turns: usize = 20,
 
@@ -82,10 +89,29 @@ pub const Session = struct {
     pub fn deinit(self: *Session) void {
         for (self.history.items) |*t| t.deinit(self.alloc);
         self.history.deinit(self.alloc);
+        if (self.knowledge_context) |kc| self.alloc.free(kc);
         self.alloc.free(self.id);
         self.alloc.free(self.voice);
         self.alloc.free(self.language);
         self.* = undefined;
+    }
+
+    /// Set the Pulse knowledge for the current turn (owned copy).
+    /// Pass null to clear it. Replacing frees the old context.
+    pub fn setKnowledgeContext(self: *Session, text: ?[]const u8) !void {
+        if (self.knowledge_context) |kc| self.alloc.free(kc);
+        self.knowledge_context = null;
+        if (text) |t| {
+            if (t.len == 0) return;
+            self.knowledge_context = try self.alloc.dupe(u8, t);
+        }
+    }
+
+    /// Clear the turn's Pulse knowledge (called when the turn ends
+    /// so it never leaks into a later turn's prompt).
+    pub fn clearKnowledgeContext(self: *Session) void {
+        if (self.knowledge_context) |kc| self.alloc.free(kc);
+        self.knowledge_context = null;
     }
 
     pub fn turnCount(self: *const Session) usize {
@@ -105,6 +131,7 @@ pub const Session = struct {
 
     /// Render the prompt the brain sees: the system prompt (the
     /// operator's override, else the default Sando persona), the
+    /// Pulse knowledge for this turn when there is any, the
     /// history, and the trailing "Assistant:" cue. The last history
     /// turn is the current user text. Every brain path (mock, agent,
     /// HTTP) receives this prompt, so the persona rides on every
@@ -122,6 +149,16 @@ pub const Session = struct {
         if (lang_line.len > 0) {
             try out.appendSlice(alloc, lang_line);
             try out.append(alloc, '\n');
+        }
+        // Pulse knowledge for this turn, when the conversation
+        // fetched any. Labelled as context that may be incomplete,
+        // so the brain treats it as leads, not settled fact.
+        if (self.knowledge_context) |kc| {
+            if (kc.len > 0) {
+                try out.appendSlice(alloc, "Knowledge from Sando Pulse (may be incomplete — use it as context, not as settled fact):\n");
+                try out.appendSlice(alloc, kc);
+                try out.append(alloc, '\n');
+            }
         }
         for (self.history.items) |t| {
             try out.appendSlice(alloc, switch (t.role) {
@@ -247,6 +284,20 @@ pub const TurnResult = struct {
     asr: LegStatus = .skipped,
     brain: LegStatus = .skipped,
     tts: LegStatus = .skipped,
+    /// Pulse knowledge leg: .ran = knowledge fetched and injected
+    /// into the prompt; .unavailable = Pulse unreachable or had
+    /// nothing on the question (the turn still ran, without
+    /// knowledge); .skipped = Pulse disabled, or the turn did not
+    /// ask anything knowledge-needing.
+    pulse: LegStatus = .skipped,
+    /// Short note about the Pulse leg, when there is one to tell:
+    /// e.g. "Pulse: 2 sources, confidence 0.82", or the reason
+    /// knowledge was not used.
+    pulse_note: ?[]const u8 = null,
+    /// The Pulse context injected into this turn's prompt (owned),
+    /// when there was one. Kept so the caller can show or log what
+    /// the brain actually saw.
+    pulse_context: ?[]const u8 = null,
     sentences_spoken: u32 = 0,
     sentences_from_cache: u32 = 0,
     sentences_skipped: u32 = 0,
@@ -259,6 +310,8 @@ pub const TurnResult = struct {
         alloc.free(self.reply);
         if (self.partial_reply) |p| alloc.free(p);
         if (self.interrupt_text) |t| alloc.free(t);
+        if (self.pulse_note) |n| alloc.free(n);
+        if (self.pulse_context) |c| alloc.free(c);
         self.* = undefined;
     }
 };
@@ -297,6 +350,11 @@ pub const Conversation = struct {
     asr: ?*runtime.Session = null,
     tts: ?*runtime.Session = null,
     cache: ?*cache.SmartCache = null,
+    /// Optional Pulse client for knowledge. Borrowed (the caller
+    /// owns it); null = no Pulse integration for this
+    /// conversation. When set and enabled, a turn that asks
+    /// something knowledge-needing consults Pulse first.
+    pulse: ?*pulse.PulseClient = null,
     sample_rate: u32 = 24000,
     /// Turn-end probability at or above this counts as "reply now".
     turn_end_threshold: f32 = 0.6,
@@ -421,6 +479,7 @@ pub const Conversation = struct {
             .mode = .offline,
             .text = sentence,
             .language = self.session.language,
+            .voice = self.session.voice,
         };
         var resp = try tts.run(self.io, self.alloc, req);
         defer resp.deinit();
@@ -492,12 +551,48 @@ pub const Conversation = struct {
         self.streaming = false;
         defer self.alloc.free(returned);
         // A non-streaming brain never called on_chunk: run its whole
-        // reply through the chunker so its sentences still speak.
+        // reply through the chunker so its sentences still speak, and
+        // keep the text — without this the caller records an empty
+        // reply even though the brain answered.
         if (self.reply_buf.items.len == 0 and returned.len > 0) {
             try self.chunker.feed(returned, self, onSentence);
+            try self.reply_buf.appendSlice(self.alloc, returned);
         }
         try self.chunker.finish(self, onSentence);
         return try self.alloc.dupe(u8, self.reply_buf.items);
+    }
+
+    /// Consult Pulse for the current turn when it asks something
+    /// knowledge-needing. On success with usable knowledge the
+    /// context is set on the session (so renderPrompt carries it)
+    /// and recorded on the result; on any failure the turn
+    /// proceeds without knowledge and the result says so plainly.
+    /// Never blocks the conversation on Pulse, never fakes an
+    /// answer.
+    fn fetchPulseKnowledge(self: *Conversation, result: *TurnResult, trimmed: []const u8) !void {
+        const client = self.pulse orelse return;
+        if (!client.enabled) return;
+        const needs = pulse.needsKnowledge(self.alloc, trimmed) catch return;
+        if (!needs) return;
+        const maybe_knowledge = client.query(self.alloc, self.io, trimmed) catch |err| {
+            result.pulse = .unavailable;
+            result.pulse_note = try std.fmt.allocPrint(self.alloc, "Pulse unreachable ({t}) — answered without knowledge", .{err});
+            return;
+        };
+        var k = maybe_knowledge orelse return; // disabled between checks
+        defer k.deinit(self.alloc);
+        if (!k.usable()) {
+            result.pulse = .unavailable;
+            result.pulse_note = try self.alloc.dupe(u8, "Pulse had nothing on that — answered without knowledge");
+            return;
+        }
+        const context = try pulse.formatKnowledge(self.alloc, &k);
+        defer self.alloc.free(context);
+        try self.session.setKnowledgeContext(context);
+        result.pulse = .ran;
+        const plural: []const u8 = if (k.sources.len == 1) "" else "s";
+        result.pulse_note = try std.fmt.allocPrint(self.alloc, "Pulse: {d} source{s}, confidence {d:.2}", .{ k.sources.len, plural, k.confidence });
+        result.pulse_context = try self.alloc.dupe(u8, context);
     }
 
     /// One text turn: user text in, brain reply out, sentences
@@ -515,6 +610,13 @@ pub const Conversation = struct {
         if (trimmed.len == 0) return result;
 
         try self.session.appendTurn(.user, trimmed);
+        // Pulse knowledge, consulted FIRST when the turn asks
+        // something knowledge-needing. The context is cleared when
+        // the turn ends (the defer below) so it never leaks into a
+        // later turn — but it stays set for the barge-in follow-up,
+        // which re-renders the prompt before this returns.
+        defer self.session.clearKnowledgeContext();
+        try self.fetchPulseKnowledge(&result, trimmed);
         const prompt = try self.session.renderPrompt(self.alloc);
         defer self.alloc.free(prompt);
         self.resetTurnState();
@@ -860,4 +962,132 @@ test "audio turn without an asr session reports unavailable" {
     defer result.deinit(alloc);
     try std.testing.expect(result.asr == .unavailable);
     try std.testing.expectEqualStrings("", result.reply);
+}
+
+test "session prompt carries pulse knowledge when set, clears after" {
+    const alloc = std.testing.allocator;
+    var session = try Session.init(alloc, std.testing.io, "v1", "en");
+    defer session.deinit();
+    try session.appendTurn(.user, "hello");
+    const plain = try session.renderPrompt(alloc);
+    defer alloc.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "Sando Pulse") == null);
+
+    try session.setKnowledgeContext("Knowledge from Sando Pulse (2 sources, confidence 0.82):\n- Road blocked (Paper): ...");
+    const with_knowledge = try session.renderPrompt(alloc);
+    defer alloc.free(with_knowledge);
+    try std.testing.expect(std.mem.indexOf(u8, with_knowledge, "Knowledge from Sando Pulse (may be incomplete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_knowledge, "Road blocked") != null);
+    // Knowledge sits between the persona and the history.
+    const kb_pos = std.mem.indexOf(u8, with_knowledge, "Road blocked").?;
+    const user_pos = std.mem.indexOf(u8, with_knowledge, "User: hello").?;
+    try std.testing.expect(kb_pos < user_pos);
+
+    session.clearKnowledgeContext();
+    const cleared = try session.renderPrompt(alloc);
+    defer alloc.free(cleared);
+    try std.testing.expect(std.mem.indexOf(u8, cleared, "Road blocked") == null);
+}
+
+/// Minimal Pulse /v1/query body for the conversation tests.
+const pulse_query_fixture =
+    \\{"query":"roads","answer":"Several reports describe road closures.","sufficient":true,"confidence":0.82,"results":[{"title":"Road blocked in Sinkor","summary":"A road in Sinkor has been blocked since this morning.","url":"https://example.com/road","source":{"name":"FrontPage Africa","url":"https://example.com"},"published_at":"2026-11-15T08:00:00Z","score":0.91}],"events":[],"meta":{"request_id":"r1","results_count":1,"sources_checked":9}}
+;
+
+/// A brain that captures the prompt it received and answers "noted."
+const CaptureBrain = struct {
+    prompt_seen: ?[]const u8 = null,
+    alloc: std.mem.Allocator,
+
+    fn callback(ctx: *anyopaque, cb_alloc: std.mem.Allocator, prompt: []const u8, chunk_ctx: *anyopaque, on_chunk: brain.ChunkFn) anyerror![]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.prompt_seen) |p| cb_alloc.free(p);
+        self.prompt_seen = try cb_alloc.dupe(u8, prompt);
+        // Stream the reply the way a real host brain does: the
+        // chunks are what the conversation records and speaks.
+        try on_chunk(chunk_ctx, "noted.");
+        return try cb_alloc.dupe(u8, "noted.");
+    }
+};
+
+test "text turn injects pulse knowledge into the brain prompt" {
+    const alloc = std.testing.allocator;
+    var sender = pulse.TestSender{ .chunks = &.{pulse_query_fixture} };
+    defer sender.deinit(alloc);
+    var client = pulse.PulseClient.init("http://127.0.0.1:9000", true, sender.asSender());
+    var capture = CaptureBrain{ .alloc = alloc };
+    defer if (capture.prompt_seen) |p| alloc.free(p);
+    var agent = brain.AgentBrain{ .ctx = &capture, .callback = CaptureBrain.callback };
+    var conv = try Conversation.init(alloc, std.testing.io, agent.asBrain(), "v1", "en");
+    defer conv.deinit();
+    conv.pulse = &client;
+
+    var result = try conv.processText("What happened with the roads in Monrovia?");
+    defer result.deinit(alloc);
+    try std.testing.expect(result.pulse == .ran);
+    try std.testing.expect(result.pulse_note != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.pulse_note.?, "1 source") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.pulse_note.?, "0.82") != null);
+    try std.testing.expect(result.pulse_context != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.pulse_context.?, "Road blocked in Sinkor") != null);
+    // The brain saw the context: it is in the captured prompt.
+    const prompt = capture.prompt_seen.?;
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Knowledge from Sando Pulse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Road blocked in Sinkor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "FrontPage Africa") != null);
+    try std.testing.expectEqualStrings("noted.", result.reply);
+    // The turn is over: the knowledge does not leak into the next prompt.
+    const next = try conv.session.renderPrompt(alloc);
+    defer alloc.free(next);
+    try std.testing.expect(std.mem.indexOf(u8, next, "Road blocked in Sinkor") == null);
+}
+
+test "text turn proceeds without knowledge when pulse is unreachable" {
+    const alloc = std.testing.allocator;
+    var sender = pulse.TestSender{ .chunks = &.{}, .fail = error.ConnectionRefused };
+    defer sender.deinit(alloc);
+    var client = pulse.PulseClient.init("http://127.0.0.1:9000", true, sender.asSender());
+    var capture = CaptureBrain{ .alloc = alloc };
+    defer if (capture.prompt_seen) |p| alloc.free(p);
+    var agent = brain.AgentBrain{ .ctx = &capture, .callback = CaptureBrain.callback };
+    var conv = try Conversation.init(alloc, std.testing.io, agent.asBrain(), "v1", "en");
+    defer conv.deinit();
+    conv.pulse = &client;
+
+    var result = try conv.processText("What is the latest news?");
+    defer result.deinit(alloc);
+    // The turn still ran: the brain answered, nothing was faked.
+    try std.testing.expectEqualStrings("noted.", result.reply);
+    try std.testing.expect(result.pulse == .unavailable);
+    try std.testing.expect(result.pulse_note != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.pulse_note.?, "unreachable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.prompt_seen.?, "Sando Pulse") == null);
+}
+
+test "text turn skips pulse when disabled or not a question" {
+    const alloc = std.testing.allocator;
+    // Disabled: the sender is never called.
+    var sender = pulse.TestSender{ .chunks = &.{pulse_query_fixture} };
+    defer sender.deinit(alloc);
+    var client = pulse.PulseClient.init("http://127.0.0.1:9000", false, sender.asSender());
+    var mock = brain.MockBrain{};
+    var conv = try Conversation.init(alloc, std.testing.io, mock.asBrain(), "v1", "en");
+    defer conv.deinit();
+    conv.pulse = &client;
+    var result = try conv.processText("What happened with the roads?");
+    defer result.deinit(alloc);
+    try std.testing.expect(result.pulse == .skipped);
+    try std.testing.expect(sender.url_seen == null);
+
+    // Enabled but a greeting: no knowledge-needing question.
+    var sender2 = pulse.TestSender{ .chunks = &.{pulse_query_fixture} };
+    defer sender2.deinit(alloc);
+    var client2 = pulse.PulseClient.init("http://127.0.0.1:9000", true, sender2.asSender());
+    var conv2 = try Conversation.init(alloc, std.testing.io, mock.asBrain(), "v1", "en");
+    defer conv2.deinit();
+    conv2.pulse = &client2;
+    var result2 = try conv2.processText("hello");
+    defer result2.deinit(alloc);
+    try std.testing.expect(result2.pulse == .skipped);
+    try std.testing.expect(sender2.url_seen == null);
 }

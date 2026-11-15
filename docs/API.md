@@ -135,7 +135,9 @@ mock brain only — a real LLM brain is a library-level choice
 wire.
 
 `POST /v1/conversation/<id>/ask` `{"text":"hello"}` →
-`{"id":"...","transcript":"hello","reply":"Hey! Good to hear you. What's going on?","asr":"skipped","brain":"ran","tts":"unavailable","barged_in":false,"turns":2,"partial_reply":null,"interrupt_text":null}`.
+`{"id":"...","transcript":"hello","reply":"Hey! Good to hear you. What's going on?","asr":"skipped","brain":"ran","tts":"unavailable","pulse":"skipped","pulse_note":null,"pulse_context":null,"barged_in":false,"turns":2,"partial_reply":null,"interrupt_text":null}`.
+
+When the turn asks something knowledge-needing and Pulse is on, the ask goes to Pulse first and the answer rides in the brain's prompt: `pulse` is `"ran"` with `pulse_note` like `"Pulse: 2 sources, confidence 0.82"` and `pulse_context` carrying the formatted knowledge the brain saw. When Pulse is unreachable or has nothing on the question, `pulse` is `"unavailable"`, `pulse_note` says so plainly, and the turn still runs without knowledge — the engine never fakes an answer. `pulse` is `"skipped"` when Pulse is disabled or the turn is not a question. Pulse is configured in the `[pulse]` section of `config/sando.toml` (`url`, default `http://127.0.0.1:9000`; `enabled`, default `true`) and the brain model path in `[brain]` (`url`, default the local Ollama chat-completions endpoint; `model`, default `"local"`); `converse` accepts `--pulse-url`, `--no-pulse`, `--brain-url`, `--brain-model` for one run.
 `asr`/`brain`/`tts` are leg statuses (`skipped`/`ran`/`unavailable`
 for text turns; `tts` is `unavailable` on this VM).
 

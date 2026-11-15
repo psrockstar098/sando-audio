@@ -34,6 +34,7 @@ pub const reflex = @import("reflex.zig");
 pub const brain = @import("brain.zig");
 pub const persona = @import("persona.zig");
 pub const conversation = @import("conversation.zig");
+pub const pulse = @import("pulse.zig");
 pub const language = @import("language.zig");
 pub const vocabulary = @import("vocabulary.zig");
 pub const pronunciation = @import("pronunciation.zig");
@@ -71,6 +72,7 @@ test {
     _ = @import("brain.zig");
     _ = @import("persona.zig");
     _ = @import("conversation.zig");
+    _ = @import("pulse.zig");
     _ = @import("language.zig");
     _ = @import("vocabulary.zig");
     _ = @import("pronunciation.zig");

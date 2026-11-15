@@ -44,6 +44,23 @@ pub const ModelEntry = struct {
     weight_id: ?[]const u8 = null,
 };
 
+/// The brain model path. The engine does NOT run LLM weights
+/// itself (audio.cpp is audio models only) — the brain lives
+/// behind an OpenAI-compatible server (Ollama by default), and
+/// this section says which server and which model to ask for.
+pub const BrainConfig = struct {
+    url: []const u8 = "http://127.0.0.1:11434/v1/chat/completions",
+    model: []const u8 = "local",
+};
+
+/// Sando Pulse, the knowledge side. The engine asks Pulse for
+/// knowledge out of the box (enabled by default); the URL points
+/// at the local Pulse server.
+pub const PulseConfig = struct {
+    url: []const u8 = "http://127.0.0.1:9000",
+    enabled: bool = true,
+};
+
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     mode: RuntimeMode = .realtime,
@@ -55,6 +72,10 @@ pub const Config = struct {
     /// Operator system-prompt override (borrowed from the config
     /// arena). Null = use the built-in Sando persona (persona.zig).
     persona_prompt: ?[]const u8 = null,
+    /// Which brain server + model to ask for (CLI flags override).
+    brain: BrainConfig = .{},
+    /// Pulse knowledge integration (CLI flags override).
+    pulse: PulseConfig = .{},
     models: []ModelEntry = &.{},
 
     pub fn deinit(self: *Config) void {
@@ -95,10 +116,12 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
     var webgpu = false;
     var low_power = false;
     var persona_prompt: ?[]const u8 = null;
+    var brain_cfg = BrainConfig{};
+    var pulse_cfg = PulseConfig{};
     var models: std.ArrayList(ModelEntry) = .empty;
     defer models.deinit(a);
 
-    var section: enum { none, runtime, hardware, persona, models } = .none;
+    var section: enum { none, runtime, hardware, persona, brain, pulse, models } = .none;
     var cur: ?*ModelEntry = null;
     var seen_runtime_mode = false;
     var seen_sample_rate = false;
@@ -131,6 +154,10 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
                 section = .hardware;
             } else if (std.mem.eql(u8, name, "persona")) {
                 section = .persona;
+            } else if (std.mem.eql(u8, name, "brain")) {
+                section = .brain;
+            } else if (std.mem.eql(u8, name, "pulse")) {
+                section = .pulse;
             } else {
                 return error.UnknownSection;
             }
@@ -186,6 +213,24 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
                     return error.UnknownKey;
                 }
             },
+            .brain => {
+                if (std.mem.eql(u8, key, "url")) {
+                    brain_cfg.url = try a.dupe(u8, try parseString(raw_value));
+                } else if (std.mem.eql(u8, key, "model")) {
+                    brain_cfg.model = try a.dupe(u8, try parseString(raw_value));
+                } else {
+                    return error.UnknownKey;
+                }
+            },
+            .pulse => {
+                if (std.mem.eql(u8, key, "url")) {
+                    pulse_cfg.url = try a.dupe(u8, try parseString(raw_value));
+                } else if (std.mem.eql(u8, key, "enabled")) {
+                    pulse_cfg.enabled = try parseBool(raw_value);
+                } else {
+                    return error.UnknownKey;
+                }
+            },
             .models => {
                 const m = cur orelse return error.InvalidSyntax;
                 if (std.mem.eql(u8, key, "name")) {
@@ -228,6 +273,12 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
     }
     if (!backend_ok) return error.InvalidValue;
 
+    // URLs must name a server (http/https). A bare word is a typo,
+    // not a server — reject it here instead of failing mid-turn.
+    if (brain_cfg.url.len == 0 or (!std.mem.startsWith(u8, brain_cfg.url, "http://") and !std.mem.startsWith(u8, brain_cfg.url, "https://"))) return error.InvalidValue;
+    if (pulse_cfg.url.len == 0 or (!std.mem.startsWith(u8, pulse_cfg.url, "http://") and !std.mem.startsWith(u8, pulse_cfg.url, "https://"))) return error.InvalidValue;
+    if (brain_cfg.model.len == 0) return error.InvalidValue;
+
     for (models.items) |m| {
         if (m.name.len == 0 or m.file.len == 0) return error.MissingField;
     }
@@ -249,6 +300,8 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) ConfigError!Config {
         .webgpu = webgpu,
         .low_power = low_power,
         .persona_prompt = persona_prompt,
+        .brain = brain_cfg,
+        .pulse = pulse_cfg,
         .models = try models.toOwnedSlice(a),
     };
 }
@@ -297,7 +350,7 @@ fn parseBool(raw: []const u8) ConfigError!bool {
     return error.InvalidValue;
 }
 
-const example_config =
+pub const example_config =
     \\[runtime]
     \\mode = "realtime"
     \\sample_rate = 24000
@@ -310,6 +363,22 @@ const example_config =
     \\
     \\[persona]
     \\system_prompt = "You are Sando. Talk like a real person, not like a voice assistant. Speak natural Liberian English, warm, easy, and free-flowing. Use Koloqua words and expressions when they fit, the way people in Liberia actually talk. Keep it short, like something you would say out loud. One or two sentences is usually enough; say more only when the person really needs it. You can talk about anything. If the person is just chatting, chat back. Answer questions straight, react to what they say, and ask something back when it feels natural. Remember what was said earlier in this conversation and build on it. Never introduce yourself as a machine or an assistant, and never open with a stiff greeting or an offer to help. Just talk."
+    \\
+    \\# The brain model path. The engine does not run LLM weights
+    \\# itself — the brain lives behind an OpenAI-compatible server
+    \\# (Ollama by default). Set the server and model here; the
+    \\# --brain-url / --brain-model flags override these two lines.
+    \\[brain]
+    \\url = "http://127.0.0.1:11434/v1/chat/completions"
+    \\model = "local"
+    \\
+    \\# Sando Pulse, the knowledge side. On out of the box: when a
+    \\# turn needs knowledge, the engine asks Pulse first and the
+    \\# answer rides in the prompt. Set enabled = false to talk
+    \\# without Pulse; --no-pulse does the same for one run.
+    \\[pulse]
+    \\url = "http://127.0.0.1:9000"
+    \\enabled = true
     \\
     \\[[models]]
     \\name = "qwen3-tts-0.6b"
@@ -347,6 +416,11 @@ test "parse example config" {
     // The example ships the default persona as the override text.
     try std.testing.expect(cfg.persona_prompt != null);
     try std.testing.expect(std.mem.indexOf(u8, cfg.persona_prompt.?, "Talk like a real person") != null);
+    // The example ships the brain + pulse sections.
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", cfg.brain.url);
+    try std.testing.expectEqualStrings("local", cfg.brain.model);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9000", cfg.pulse.url);
+    try std.testing.expect(cfg.pulse.enabled);
     try std.testing.expectEqualStrings("qwen3-tts-0.6b", cfg.models[0].name);
     try std.testing.expect(cfg.models[0].kind == .tts);
     try std.testing.expectEqualStrings("liberian-voice-01", cfg.models[0].voice.?);
@@ -456,4 +530,101 @@ test "reject duplicate model names and missing fields" {
         \\
     ;
     try std.testing.expectError(error.MissingField, parse(alloc, missing));
+}
+
+test "brain and pulse sections default when absent, override when present" {
+    const alloc = std.testing.allocator;
+    const minimal =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\
+    ;
+    var cfg = try parse(alloc, minimal);
+    defer cfg.deinit();
+    // Absent sections = the out-of-the-box defaults.
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", cfg.brain.url);
+    try std.testing.expectEqualStrings("local", cfg.brain.model);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9000", cfg.pulse.url);
+    try std.testing.expect(cfg.pulse.enabled);
+
+    const overridden =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[brain]
+        \\url = "http://192.168.1.5:11434/v1/chat/completions"
+        \\model = "sando-brain-7b"
+        \\[pulse]
+        \\url = "http://192.168.1.5:9000"
+        \\enabled = false
+        \\
+    ;
+    var cfg2 = try parse(alloc, overridden);
+    defer cfg2.deinit();
+    try std.testing.expectEqualStrings("http://192.168.1.5:11434/v1/chat/completions", cfg2.brain.url);
+    try std.testing.expectEqualStrings("sando-brain-7b", cfg2.brain.model);
+    try std.testing.expectEqualStrings("http://192.168.1.5:9000", cfg2.pulse.url);
+    try std.testing.expect(!cfg2.pulse.enabled);
+}
+
+test "brain and pulse reject bad urls and unknown keys" {
+    const alloc = std.testing.allocator;
+    const bad_brain_url =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[brain]
+        \\url = "not-a-server"
+        \\
+    ;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, bad_brain_url));
+
+    const bad_pulse_url =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[pulse]
+        \\url = "ftp://example.com"
+        \\
+    ;
+    try std.testing.expectError(error.InvalidValue, parse(alloc, bad_pulse_url));
+
+    const bad_key =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[pulse]
+        \\timeout = 5
+        \\
+    ;
+    try std.testing.expectError(error.UnknownKey, parse(alloc, bad_key));
+
+    const bad_section =
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[knowledge]
+        \\url = "http://127.0.0.1:9000"
+        \\
+    ;
+    try std.testing.expectError(error.UnknownSection, parse(alloc, bad_section));
 }

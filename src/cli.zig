@@ -10,6 +10,7 @@
 //!                     [--iterations n] [--text "..."]
 //!   sando-audio converse [--config path] [--wav turn.wav ...] [--interrupt in.wav]
 //!                     [--brain mock|http] [--brain-url url] [--brain-model name]
+//!                     [--pulse-url url] [--no-pulse]
 //!                     [--voice name] [--language en] [--cache] [--out-dir dir]
 //!   sando-audio models list [--config path]
 //!   sando-audio plugins list [--dir path]
@@ -44,6 +45,7 @@ const languageforge = @import("languageforge.zig");
 const evaluate = @import("evaluate.zig");
 const oneapi = @import("oneapi.zig");
 const server = @import("server.zig");
+const pulse = @import("pulse.zig");
 
 pub const usage =
     \\sando-audio 0.5.0 — SANDO Audio, Phase 5 (Developer Ecosystem, Production & Applications)
@@ -59,6 +61,7 @@ pub const usage =
     \\  sando-audio vad [--config path] [--model name] [--wav in.wav]
     \\  sando-audio converse [--config path] [--wav turn.wav ...] [--interrupt in.wav]
     \\                   [--brain mock|http] [--brain-url url] [--brain-model name]
+    \\                   [--pulse-url url] [--no-pulse]
     \\                   [--voice name] [--language en] [--cache] [--out-dir dir]
     \\  sando-audio talk <text> [--language en] [--voice name] [--correct wrong=right ...]
     \\  sando-audio language list
@@ -150,14 +153,42 @@ pub const ConverseOpts = struct {
     /// reply (barge-in). If never consumed, runs as a final turn.
     interrupt_wav: ?[]const u8 = null,
     brain: ConverseBrain = .mock,
-    brain_url: []const u8 = "http://127.0.0.1:11434/v1/chat/completions",
-    brain_model: []const u8 = "local",
+    /// CLI overrides for the [brain] config section. Null = not
+    /// given on the command line, so the config value (or its
+    /// default) is used. CLI wins over config when given.
+    brain_url: ?[]const u8 = null,
+    brain_model: ?[]const u8 = null,
+    /// CLI override for the [pulse] config section: a different
+    /// Pulse server for this run. Null = the config value.
+    pulse_url: ?[]const u8 = null,
+    /// Turn Pulse off for this run (the config stays enabled).
+    no_pulse: bool = false,
     voice: []const u8 = "v1",
     language: []const u8 = "en",
     cache: bool = false,
     /// Where spoken TTS audio is written (turn<N>-sent<M>.wav).
     out_dir: []const u8 = "converse-out",
 };
+
+/// Resolve the brain server + model for a `converse` run: the CLI
+/// flags win when given, otherwise the [brain] config section (or
+/// its defaults). Pure — unit-tested, no I/O.
+pub fn resolveBrain(cfg: *const config.Config, cli_url: ?[]const u8, cli_model: ?[]const u8) config.BrainConfig {
+    return .{
+        .url = cli_url orelse cfg.brain.url,
+        .model = cli_model orelse cfg.brain.model,
+    };
+}
+
+/// Resolve the Pulse settings for a `converse` run: the CLI
+/// --pulse-url wins when given, --no-pulse disables Pulse for the
+/// run, otherwise the [pulse] config section (or its defaults).
+pub fn resolvePulse(cfg: *const config.Config, cli_url: ?[]const u8, no_pulse: bool) config.PulseConfig {
+    return .{
+        .url = cli_url orelse cfg.pulse.url,
+        .enabled = cfg.pulse.enabled and !no_pulse,
+    };
+}
 
 /// Language commands (Phase 4, Polyglot / NativeTongue).
 pub const LanguageOpts = union(enum) {
@@ -429,6 +460,11 @@ pub fn parseArgs(alloc: std.mem.Allocator, args: []const []const u8) ParseError!
             } else if (i + 1 < args.len and std.mem.eql(u8, a, "--brain-model")) {
                 opts.brain_model = args[i + 1];
                 i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--pulse-url")) {
+                opts.pulse_url = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--no-pulse")) {
+                opts.no_pulse = true;
             } else if (i + 1 < args.len and std.mem.eql(u8, a, "--voice")) {
                 opts.voice = args[i + 1];
                 i += 1;
@@ -880,6 +916,23 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
     // Lazy: load only the models this task needs. A missing TTS file
     // never blocks an ASR run (and vice versa).
     eng.loadModelsForTask(opts.task) catch |err| {
+        // VAD degrades to the energy fallback (same as the `vad`
+        // subcommand) instead of failing outright when its model
+        // cannot load — e.g. silero needs ONNX Runtime, which this
+        // build does not link.
+        if (opts.task == .vad) {
+            const wav_path = opts.wav_in orelse {
+                std.debug.print("vad needs --wav in.wav\n", .{});
+                return 2;
+            };
+            var wav = audio.readWavFile(alloc, io, wav_path) catch |read_err| {
+                std.debug.print("cannot read {s} ({t})\n", .{ wav_path, read_err });
+                return 1;
+            };
+            defer wav.deinit(alloc);
+            std.debug.print("cannot load model {s} ({t}) — energy fallback\n", .{ eng.last_error_model orelse "?", err });
+            return runEnergyVad(alloc, out, wav);
+        }
         std.debug.print("cannot load model {s} ({t})\n", .{ eng.last_error_model orelse "?", err });
         return 1;
     };
@@ -926,6 +979,7 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                 .mode = opts.mode,
                 .text = text,
                 .language = model.language,
+                .voice = opts.voice orelse model.voice,
             };
             var resp: runtime.Response = undefined;
             if (opts.mode == .streaming) {
@@ -963,6 +1017,10 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                 }
             }
             var session = eng.createSession(model.name, task_kind, opts.mode) catch |err| {
+                if (task_kind == .vad) {
+                    std.debug.print("cannot create session for {s} ({t}) — energy fallback\n", .{ model.name, err });
+                    return runEnergyVad(alloc, out, wav);
+                }
                 std.debug.print("cannot create session for {s} ({t})\n", .{ model.name, err });
                 return 1;
             };
@@ -1090,6 +1148,37 @@ fn cmdStream(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: St
     return 0;
 }
 
+/// Energy VAD over a WAV file, labelled as a fallback — never
+/// presented as a model result. Shared by the `vad` subcommand and
+/// `run --task vad` when no vad model can load.
+fn runEnergyVad(alloc: std.mem.Allocator, out: *std.Io.Writer, wav: audio.WavData) !u8 {
+    var energy = vad.EnergyVad.init(wav.sample_rate);
+    var tracker = vad.VadTracker.init(alloc, wav.sample_rate);
+    defer tracker.deinit();
+    var offset: usize = 0;
+    const chunk_frames = wav.sample_rate / 10; // 100 ms chunks
+    while (offset < wav.samples.len) {
+        const end = @min(offset + chunk_frames * @as(usize, wav.channels), wav.samples.len);
+        // EnergyVad is mono: feed channel 0 when stereo.
+        if (wav.channels == 1) {
+            if (energy.feed(wav.samples[offset..end])) |act| try tracker.feed(act);
+        } else {
+            var mono = try alloc.alloc(f32, (end - offset) / @as(usize, wav.channels));
+            defer alloc.free(mono);
+            for (0..mono.len) |i| mono[i] = wav.samples[offset + i * @as(usize, wav.channels)];
+            if (energy.feed(mono)) |act| try tracker.feed(act);
+        }
+        offset = end;
+    }
+    try tracker.finish(@intCast(wav.samples.len / @as(usize, wav.channels)));
+    for (tracker.segments.items) |seg| {
+        try out.print("segment: {d}..{d} peak {d:.2}\n", .{ seg.start_sample, seg.end_sample, seg.peak_probability });
+    }
+    try out.print("vad: energy fallback (no vad model loaded), {d} segment(s)\n", .{tracker.segmentCount()});
+    try out.flush();
+    return 0;
+}
+
 /// VAD over a WAV file. With a vad model loaded, the model runs and
 /// its segments print; without one, the energy fallback runs and the
 /// output says so — never presented as a model result.
@@ -1140,31 +1229,7 @@ fn cmdVad(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VadOp
     }
 
     // No vad model available: energy fallback, labelled as such.
-    var energy = vad.EnergyVad.init(wav.sample_rate);
-    var tracker = vad.VadTracker.init(alloc, wav.sample_rate);
-    defer tracker.deinit();
-    var offset: usize = 0;
-    const chunk_frames = wav.sample_rate / 10; // 100 ms chunks
-    while (offset < wav.samples.len) {
-        const end = @min(offset + chunk_frames * @as(usize, wav.channels), wav.samples.len);
-        // EnergyVad is mono: feed channel 0 when stereo.
-        if (wav.channels == 1) {
-            if (energy.feed(wav.samples[offset..end])) |act| try tracker.feed(act);
-        } else {
-            var mono = try alloc.alloc(f32, (end - offset) / @as(usize, wav.channels));
-            defer alloc.free(mono);
-            for (0..mono.len) |i| mono[i] = wav.samples[offset + i * @as(usize, wav.channels)];
-            if (energy.feed(mono)) |act| try tracker.feed(act);
-        }
-        offset = end;
-    }
-    try tracker.finish(@intCast(wav.samples.len / @as(usize, wav.channels)));
-    for (tracker.segments.items) |seg| {
-        try out.print("segment: {d}..{d} peak {d:.2}\n", .{ seg.start_sample, seg.end_sample, seg.peak_probability });
-    }
-    try out.print("vad: energy fallback (no vad model loaded), {d} segment(s)\n", .{tracker.segmentCount()});
-    try out.flush();
-    return 0;
+    return runEnergyVad(alloc, out, wav);
 }
 
 /// Free memory (bytes) from /proc/meminfo, or null when unreadable
@@ -1297,10 +1362,16 @@ fn runConverseTurn(
     } else |_| {}
     if (result.partial_reply) |p| try out.print("  reply cut short at: \"{s}\"\n", .{p});
     if (result.interrupt_text) |t| try out.print("  interrupted by: \"{s}\"\n", .{t});
-    try out.print("  legs: asr={s} brain={s} tts={s} (spoken {d}, cached {d}, skipped {d}, tts errors {d})\n", .{
+    // Pulse leg: what knowledge the brain saw, and why not when it
+    // did not. The context itself is printed so the log shows the
+    // question -> Pulse context -> reply chain in one place.
+    if (result.pulse_note) |n| try out.print("  {s}\n", .{n});
+    if (result.pulse_context) |ctx| try out.print("  pulse context:\n{s}\n", .{ctx});
+    try out.print("  legs: asr={s} brain={s} tts={s} pulse={s} (spoken {d}, cached {d}, skipped {d}, tts errors {d})\n", .{
         @tagName(result.asr),
         @tagName(result.brain),
         @tagName(result.tts),
+        @tagName(result.pulse),
         result.sentences_spoken,
         result.sentences_from_cache,
         result.sentences_skipped,
@@ -1351,13 +1422,29 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
 
     var mock = brain.MockBrain{};
     var http_sender = brain.StdHttpSender{};
-    var http_brain = brain.HttpBrain.init(opts.brain_url, opts.brain_model, http_sender.asSender());
+    // The brain server + model: CLI flags win, else [brain] config.
+    const brain_cfg = resolveBrain(&eng.cfg, opts.brain_url, opts.brain_model);
+    var http_brain = brain.HttpBrain.init(brain_cfg.url, brain_cfg.model, http_sender.asSender());
     const brain_value: brain.Brain = switch (opts.brain) {
         .mock => mock.asBrain(),
         .http => http_brain.asBrain(),
     };
     if (opts.brain == .http) {
-        try out.print("brain: http {s} model {s} (local/unauthenticated only, no key)\n", .{ opts.brain_url, opts.brain_model });
+        try out.print("brain: http {s} model {s} (local/unauthenticated only, no key)\n", .{ brain_cfg.url, brain_cfg.model });
+    }
+
+    // Pulse knowledge: the [pulse] config section (or its
+    // defaults), with --pulse-url / --no-pulse overriding for
+    // this run. The client is a local: it borrows the config URL
+    // and lives until this function returns, which outlives the
+    // conversation below.
+    const pulse_cfg = resolvePulse(&eng.cfg, opts.pulse_url, opts.no_pulse);
+    var pulse_sender = pulse.StdHttpSender{};
+    var pulse_client = pulse.PulseClient.init(pulse_cfg.url, pulse_cfg.enabled, pulse_sender.asSender());
+    if (pulse_cfg.enabled) {
+        try out.print("pulse: enabled, {s}\n", .{pulse_cfg.url});
+    } else {
+        try out.print("pulse: disabled\n", .{});
     }
 
     var smart_cache = cache.SmartCache.init(alloc, 64 << 20);
@@ -1392,6 +1479,7 @@ fn cmdConverse(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: 
     // Operator persona override from the config; otherwise the
     // built-in Sando persona (persona.zig) is the default.
     if (eng.cfg.persona_prompt) |p| conv.session.system_prompt = p;
+    conv.pulse = &pulse_client;
     conv.asr = &asr_session;
     if (tts_session) |*s| conv.tts = s;
     if (opts.cache) conv.cache = &smart_cache;
@@ -1839,6 +1927,7 @@ fn cmdBench(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: Ben
             .mode = .offline,
             .text = opts.text orelse "Hello, this is Sando.",
             .language = model.language,
+            .voice = model.voice,
         },
         .asr, .vad => blk: {
             // One second of silence at the engine's sample rate.
@@ -1963,8 +2052,8 @@ test "parseArgs accepts converse with repeatable --wav" {
     try std.testing.expectEqualStrings("b.wav", c.converse.wavs[1]);
     try std.testing.expectEqualStrings("i.wav", c.converse.interrupt_wav.?);
     try std.testing.expect(c.converse.brain == .http);
-    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", c.converse.brain_url);
-    try std.testing.expectEqualStrings("local", c.converse.brain_model);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", c.converse.brain_url.?);
+    try std.testing.expectEqualStrings("local", c.converse.brain_model.?);
     try std.testing.expectEqualStrings("v1", c.converse.voice);
     try std.testing.expectEqualStrings("kq", c.converse.language);
     try std.testing.expect(c.converse.cache);
@@ -1975,6 +2064,57 @@ test "parseArgs accepts converse with repeatable --wav" {
     try std.testing.expect(defaults.converse.brain == .mock);
     try std.testing.expect(!defaults.converse.cache);
     try std.testing.expectEqualStrings("converse-out", defaults.converse.out_dir);
+    // No brain/pulse flags: the [brain]/[pulse] config sections rule.
+    try std.testing.expect(defaults.converse.brain_url == null);
+    try std.testing.expect(defaults.converse.brain_model == null);
+    try std.testing.expect(defaults.converse.pulse_url == null);
+    try std.testing.expect(!defaults.converse.no_pulse);
+}
+
+test "parseArgs accepts --pulse-url and --no-pulse" {
+    const alloc = std.testing.allocator;
+    const c = try parseArgs(alloc, &.{ "converse", "--wav", "a.wav", "--pulse-url", "http://192.168.1.5:9000", "--no-pulse" });
+    defer alloc.free(c.converse.wavs);
+    try std.testing.expectEqualStrings("http://192.168.1.5:9000", c.converse.pulse_url.?);
+    try std.testing.expect(c.converse.no_pulse);
+}
+
+test "resolveBrain and resolvePulse prefer CLI over config" {
+    const alloc = std.testing.allocator;
+    var cfg = try config.parse(alloc, config.example_config);
+    defer cfg.deinit();
+    // Defaults: the example's [brain]/[pulse] sections.
+    const d = resolveBrain(&cfg, null, null);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", d.url);
+    try std.testing.expectEqualStrings("local", d.model);
+    const p = resolvePulse(&cfg, null, false);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9000", p.url);
+    try std.testing.expect(p.enabled);
+    // CLI wins.
+    const c = resolveBrain(&cfg, "http://192.168.1.5:11434/v1/chat/completions", "sando-brain-7b");
+    try std.testing.expectEqualStrings("http://192.168.1.5:11434/v1/chat/completions", c.url);
+    try std.testing.expectEqualStrings("sando-brain-7b", c.model);
+    const q = resolvePulse(&cfg, "http://192.168.1.5:9000", false);
+    try std.testing.expectEqualStrings("http://192.168.1.5:9000", q.url);
+    try std.testing.expect(q.enabled);
+    // --no-pulse disables even when the config enables.
+    const off = resolvePulse(&cfg, null, true);
+    try std.testing.expect(!off.enabled);
+    // A config with Pulse off stays off even without --no-pulse.
+    var off_cfg = try config.parse(alloc,
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[pulse]
+        \\enabled = false
+        \\
+    );
+    defer off_cfg.deinit();
+    const off2 = resolvePulse(&off_cfg, null, false);
+    try std.testing.expect(!off2.enabled);
 }
 
 test "listPluginFiles lists .so files in a real directory" {

@@ -47,3 +47,19 @@ streaming = false
 # the whole [persona] section to use the built-in default as-is.
 [persona]
 system_prompt = "You are Sando. Talk like a real person, not like a voice assistant. Speak natural Liberian English, warm, easy, and free-flowing. Use Koloqua words and expressions when they fit, the way people in Liberia actually talk. Keep it short, like something you would say out loud. One or two sentences is usually enough; say more only when the person really needs it. You can talk about anything. If the person is just chatting, chat back. Answer questions straight, react to what they say, and ask something back when it feels natural. Remember what was said earlier in this conversation and build on it. Never introduce yourself as a machine or an assistant, and never open with a stiff greeting or an offer to help. Just talk."
+
+# The brain model path. The engine does not run LLM weights itself —
+# the brain lives behind an OpenAI-compatible server (Ollama by
+# default). Set the server and model here; the --brain-url and
+# --brain-model flags override these two lines for one run.
+[brain]
+url = "http://127.0.0.1:11434/v1/chat/completions"
+model = "local"
+
+# Sando Pulse, the knowledge side. On out of the box: when a turn
+# needs knowledge, the engine asks Pulse first and the answer rides
+# in the prompt. Set enabled = false to talk without Pulse;
+# --no-pulse does the same for one run.
+[pulse]
+url = "http://127.0.0.1:9000"
+enabled = true

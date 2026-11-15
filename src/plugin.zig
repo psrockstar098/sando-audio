@@ -452,10 +452,18 @@ test "loadWithManifest cross-checks the descriptor, rejects mismatch" {
     defer tmp.cleanup();
     const tmp_rel = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer alloc.free(tmp_rel);
-    // Absolute .so path (the manifest lives in a tmp dir, the .so in zig-out).
-    const abs_so = try std.fmt.allocPrint(alloc, "/home/hatch/workspace/sando-audio/{s}", .{so_path});
-    defer alloc.free(abs_so);
-    const good_text = try std.fmt.allocPrint(alloc, "[plugin]\nname = \"noop\"\nversion = \"0.1.0\"\nkind = \"effect\"\nfile = \"{s}\"\ndescription = \"test\"\n", .{abs_so});
+    // The manifest lives in a tmp dir, the .so in zig-out — and a
+    // manifest's relative `file` resolves against the manifest's own
+    // directory. So the test copies the .so next to the manifests and
+    // uses its bare name: no absolute path, no hardcoded checkout
+    // path (the old "/home/hatch/workspace/sando-audio/..." literal
+    // failed with FileNotFound on any other machine, CI included,
+    // while passing on this VM only).
+    const so_bytes = try std.Io.Dir.cwd().readFileAlloc(io, so_path, alloc, .unlimited);
+    defer alloc.free(so_bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "libsando-plugin-noop.so", .data = so_bytes });
+    const so_file = "libsando-plugin-noop.so";
+    const good_text = try std.fmt.allocPrint(alloc, "[plugin]\nname = \"noop\"\nversion = \"0.1.0\"\nkind = \"effect\"\nfile = \"{s}\"\ndescription = \"test\"\n", .{so_file});
     defer alloc.free(good_text);
     try tmp.dir.writeFile(io, .{ .sub_path = "good.toml", .data = good_text });
     const good_path = try std.fmt.allocPrint(alloc, "{s}/good.toml", .{tmp_rel});
@@ -469,7 +477,7 @@ test "loadWithManifest cross-checks the descriptor, rejects mismatch" {
 
     // Wrong name in the manifest: the .so loads, then the mismatch
     // unloads it and fails.
-    const bad_text = try std.fmt.allocPrint(alloc, "[plugin]\nname = \"impostor\"\nversion = \"0.1.0\"\nkind = \"effect\"\nfile = \"{s}\"\n", .{abs_so});
+    const bad_text = try std.fmt.allocPrint(alloc, "[plugin]\nname = \"impostor\"\nversion = \"0.1.0\"\nkind = \"effect\"\nfile = \"{s}\"\n", .{so_file});
     defer alloc.free(bad_text);
     try tmp.dir.writeFile(io, .{ .sub_path = "bad.toml", .data = bad_text });
     const bad_path = try std.fmt.allocPrint(alloc, "{s}/bad.toml", .{tmp_rel});

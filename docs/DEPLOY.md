@@ -42,7 +42,13 @@ only — never from a flag or a file, and never logged.
   does **not** fit in the ~1 GB free on this VM and answers 503
   with the measured numbers. A machine with 4 GB+ free runs it —
   and CI proves TTS on a 16 GB GitHub runner (see README.md,
-  Continuous integration).
+  Continuous integration). Small TTS models (Kokoro-82M, Piper
+  Lessac) run on this VM once their voice is set in the config.
+- **Piper TTS needs system espeak-ng**: the audio.cpp build does
+  not statically link espeak (`AUDIOCPP_STATIC_ESPEAK=OFF`), so a
+  Piper session fails at creation without it. Install
+  `libespeak-ng1` + `espeak-ng-data` on the machine (Ubuntu:
+  `apt-get install -y libespeak-ng1 espeak-ng-data`).
 - **Dataset** (optional): `--data-dir` pointing at the
   `datasets/` folder (one JSON per language) enables `vocab` and
   `pronounce` with real cited entries. Without it those two answer

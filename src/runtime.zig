@@ -39,6 +39,15 @@ pub const Request = struct {
     mode: StreamMode = .offline,
     text: ?[]const u8 = null,
     language: ?[]const u8 = null,
+    /// Voice id for TTS families that select a voice per request
+    /// (Kokoro, KittenTTS: preset voice ids like "af_heart"). Sent
+    /// best-effort: families that take no voice id ignore it, and a
+    /// rejected id never fails the request — the call falls back to
+    /// the family's default voice, exactly as before this field
+    /// existed. Qwen3-TTS Base never reads it (only the CustomVoice
+    /// variant consults a speaker name), so the shipped path is
+    /// unchanged.
+    voice: ?[]const u8 = null,
     audio: ?[]const f32 = null,
     sample_rate: u32 = 24000,
     channels: u8 = 1,
@@ -127,6 +136,11 @@ pub const Session = struct {
         defer request.deinit();
         if (req.text) |t| try request.setText(alloc, t, req.language);
         if (req.audio) |a| try request.setAudio(a, req.sample_rate, req.channels);
+        if (req.task == .tts) {
+            // Best-effort: a family that takes no voice id (or rejects
+            // this one) leaves the request voiceless, as before.
+            if (req.voice) |v| request.setVoiceId(alloc, v) catch {};
+        }
         var result = try self.inner.run(&request);
         errdefer result.deinit();
         const end = std.Io.Clock.Timestamp.now(io, .awake);
@@ -141,6 +155,9 @@ pub const Session = struct {
             defer request.deinit();
             if (r.text) |t| try request.setText(alloc, t, r.language);
             if (r.audio) |a| try request.setAudio(a, r.sample_rate, r.channels);
+            if (r.task == .tts) {
+                if (r.voice) |v| request.setVoiceId(alloc, v) catch {};
+            }
             return self.inner.streamStart(&request);
         }
         return self.inner.streamStart(null);
