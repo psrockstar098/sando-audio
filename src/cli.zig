@@ -25,9 +25,14 @@ const audio = @import("audio.zig");
 const doctor = @import("doctor.zig");
 const bench = @import("bench.zig");
 const plugin = @import("plugin.zig");
+const streaming = @import("streaming.zig");
+const vad = @import("vad.zig");
+const voicedna = @import("voicedna.zig");
+const cache = @import("cache.zig");
+const audiosense = @import("audiosense.zig");
 
 pub const usage =
-    \\sando-audio 0.1.0 — SANDO Audio, Phase 1 (Core Engine & Universal Runtime)
+    \\sando-audio 0.2.0 — SANDO Audio, Phase 2 (Real-Time Speech & Voice Intelligence)
     \\
     \\Usage:
     \\  sando-audio version
@@ -35,12 +40,18 @@ pub const usage =
     \\  sando-audio config validate <path>
     \\  sando-audio run [--config path] [--model name] [--task asr|tts|vad]
     \\                  [--mode offline|streaming] [--text "..."]
-    \\                  [--wav in.wav] [--out out.wav]
+    \\                  [--wav in.wav] [--out out.wav] [--cache] [--voice name]
+    \\  sando-audio stream [--config path] [--model name] [--wav in.wav] [--cache]
+    \\  sando-audio vad [--config path] [--model name] [--wav in.wav]
+    \\  sando-audio voices list
+    \\  sando-audio voices enroll-synthetic <id> <name> [--language en]
+    \\  sando-audio voices delete <id>
     \\  sando-audio bench [--config path] [--model name] [--task asr|tts]
     \\                    [--iterations n] [--text "..."]
     \\  sando-audio models list [--config path]
     \\  sando-audio plugins list [--dir path]
     \\  sando-audio plugins load <path>
+    \\  sando-audio plugins load --manifest <path>
     \\  sando-audio help
     \\
 ;
@@ -53,6 +64,30 @@ pub const RunOpts = struct {
     text: ?[]const u8 = null,
     wav_in: ?[]const u8 = null,
     wav_out: ?[]const u8 = null,
+    /// Use the SmartCache (voice/language/context-aware). A hit skips
+    /// inference entirely and prints "cache hit".
+    cache: bool = false,
+    /// Voice id for the TTS cache key (defaults to the model's voice).
+    voice: ?[]const u8 = null,
+};
+
+pub const StreamOpts = struct {
+    config_path: []const u8 = engine.default_config_path,
+    model: ?[]const u8 = null,
+    wav_in: ?[]const u8 = null,
+    cache: bool = false,
+};
+
+pub const VadOpts = struct {
+    config_path: []const u8 = engine.default_config_path,
+    model: ?[]const u8 = null,
+    wav_in: ?[]const u8 = null,
+};
+
+pub const VoicesOpts = union(enum) {
+    list,
+    enroll_synthetic: struct { id: []const u8, name: []const u8, language: []const u8 },
+    delete: struct { id: []const u8 },
 };
 
 pub const BenchOpts = struct {
@@ -69,10 +104,14 @@ pub const Command = union(enum) {
     help,
     config_validate: struct { path: []const u8 },
     run: RunOpts,
+    stream: StreamOpts,
+    vad: VadOpts,
+    voices: VoicesOpts,
     bench: BenchOpts,
     models_list: struct { config_path: []const u8 },
     plugins_list: struct { dir: []const u8 },
     plugins_load: struct { path: []const u8 },
+    plugins_load_manifest: struct { path: []const u8 },
 };
 
 pub const ParseError = error{ Usage, OutOfMemory };
@@ -119,6 +158,9 @@ pub fn parseArgs(args: []const []const u8) ParseError!Command {
             }
             return .{ .plugins_list = .{ .dir = dir } };
         }
+        if (args.len == 4 and std.mem.eql(u8, args[1], "load") and std.mem.eql(u8, args[2], "--manifest")) {
+            return .{ .plugins_load_manifest = .{ .path = args[3] } };
+        }
         if (args.len == 3 and std.mem.eql(u8, args[1], "load")) {
             return .{ .plugins_load = .{ .path = args[2] } };
         }
@@ -153,9 +195,79 @@ pub fn parseArgs(args: []const []const u8) ParseError!Command {
             } else if (i + 1 < args.len and std.mem.eql(u8, a, "--out")) {
                 opts.wav_out = args[i + 1];
                 i += 1;
+            } else if (std.mem.eql(u8, a, "--cache")) {
+                opts.cache = true;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--voice")) {
+                opts.voice = args[i + 1];
+                i += 1;
             } else return error.Usage;
         }
         return .{ .run = opts };
+    }
+
+    if (std.mem.eql(u8, cmd, "stream")) {
+        var opts = StreamOpts{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (i + 1 < args.len and std.mem.eql(u8, a, "--config")) {
+                opts.config_path = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--model")) {
+                opts.model = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--wav")) {
+                opts.wav_in = args[i + 1];
+                i += 1;
+            } else if (std.mem.eql(u8, a, "--cache")) {
+                opts.cache = true;
+            } else return error.Usage;
+        }
+        if (opts.wav_in == null) return error.Usage;
+        return .{ .stream = opts };
+    }
+
+    if (std.mem.eql(u8, cmd, "vad")) {
+        var opts = VadOpts{};
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const a = args[i];
+            if (i + 1 < args.len and std.mem.eql(u8, a, "--config")) {
+                opts.config_path = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--model")) {
+                opts.model = args[i + 1];
+                i += 1;
+            } else if (i + 1 < args.len and std.mem.eql(u8, a, "--wav")) {
+                opts.wav_in = args[i + 1];
+                i += 1;
+            } else return error.Usage;
+        }
+        if (opts.wav_in == null) return error.Usage;
+        return .{ .vad = opts };
+    }
+
+    if (std.mem.eql(u8, cmd, "voices")) {
+        if (args.len >= 2 and std.mem.eql(u8, args[1], "list")) {
+            if (args.len != 2) return error.Usage;
+            return .{ .voices = .list };
+        }
+        if (args.len >= 2 and std.mem.eql(u8, args[1], "enroll-synthetic")) {
+            if (args.len < 4) return error.Usage;
+            var language: []const u8 = "en";
+            var i: usize = 4;
+            while (i < args.len) : (i += 1) {
+                if (i + 1 < args.len and std.mem.eql(u8, args[i], "--language")) {
+                    language = args[i + 1];
+                    i += 1;
+                } else return error.Usage;
+            }
+            return .{ .voices = .{ .enroll_synthetic = .{ .id = args[2], .name = args[3], .language = language } } };
+        }
+        if (args.len == 3 and std.mem.eql(u8, args[1], "delete")) {
+            return .{ .voices = .{ .delete = .{ .id = args[2] } } };
+        }
+        return error.Usage;
     }
 
     if (std.mem.eql(u8, cmd, "bench")) {
@@ -309,7 +421,26 @@ fn dispatch(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, cmd: Comm
             try out.flush();
             return 0;
         },
+        .plugins_load_manifest => |p| {
+            var mgr = plugin.PluginManager.init(alloc);
+            defer mgr.deinit();
+            const loaded = mgr.loadWithManifest(io, p.path) catch |err| {
+                std.debug.print("plugin manifest {s}: failed to load ({t})\n", .{ p.path, err });
+                return 1;
+            };
+            try out.print("loaded plugin {s} [{s}] version {s} (manifest {s})\n", .{
+                std.mem.span(loaded.descriptor.name),
+                @tagName(loaded.kind),
+                std.mem.span(loaded.descriptor.version),
+                p.path,
+            });
+            try out.flush();
+            return 0;
+        },
         .run => |opts| return cmdRun(alloc, io, out, opts),
+        .stream => |opts| return cmdStream(alloc, io, out, opts),
+        .vad => |opts| return cmdVad(alloc, io, out, opts),
+        .voices => |opts| return cmdVoices(alloc, io, out, opts),
         .bench => |opts| return cmdBench(alloc, io, out, opts),
     }
 }
@@ -364,7 +495,9 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
     };
     defer eng.deinit();
 
-    eng.loadConfigModels() catch |err| {
+    // Lazy: load only the models this task needs. A missing TTS file
+    // never blocks an ASR run (and vice versa).
+    eng.loadModelsForTask(opts.task) catch |err| {
         std.debug.print("cannot load model {s} ({t})\n", .{ eng.last_error_model orelse "?", err });
         return 1;
     };
@@ -378,11 +511,11 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
         .tts => .tts,
         .vad => .vad,
     };
-    var session = eng.createSession(model.name, task_kind, opts.mode) catch |err| {
-        std.debug.print("cannot create session for {s} ({t})\n", .{ model.name, err });
-        return 1;
-    };
-    defer session.deinit(alloc);
+
+    // The SmartCache is in-process only (64 MiB). A hit skips
+    // inference entirely.
+    var smart_cache = cache.SmartCache.init(alloc, 64 << 20);
+    defer smart_cache.deinit();
 
     switch (task_kind) {
         .tts => {
@@ -390,20 +523,42 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                 std.debug.print("tts needs --text \"...\"\n", .{});
                 return 2;
             };
+            if (opts.cache) {
+                const voice = opts.voice orelse model.voice orelse "default";
+                const lang = model.language orelse "en";
+                if (try smart_cache.getTts(voice, lang, "cli-run", text)) |hit| {
+                    const path = opts.wav_out orelse "out.wav";
+                    try audio.writeWavFile(io, path, hit.samples, hit.sample_rate, hit.channels, .pcm16);
+                    try out.print("cache hit: wrote {s} ({d} samples @ {d} Hz)\n", .{ path, hit.samples.len, hit.sample_rate });
+                    try out.flush();
+                    return 0;
+                }
+            }
+            var session = eng.createSession(model.name, task_kind, opts.mode) catch |err| {
+                std.debug.print("cannot create session for {s} ({t})\n", .{ model.name, err });
+                return 1;
+            };
+            defer session.deinit(alloc);
             const req = runtime.Request{
                 .task = .tts,
                 .mode = opts.mode,
                 .text = text,
                 .language = model.language,
             };
+            var resp: runtime.Response = undefined;
             if (opts.mode == .streaming) {
                 try session.streamStart(alloc, req);
-                var resp = try session.streamFinish();
-                defer resp.deinit();
-                return writeTtsOutput(io, out, &resp, opts.wav_out);
+                resp = try session.streamFinish();
+            } else {
+                resp = try session.run(io, alloc, req);
             }
-            var resp = try session.run(io, alloc, req);
             defer resp.deinit();
+            if (opts.cache) {
+                const a = try resp.audio();
+                const voice = opts.voice orelse model.voice orelse "default";
+                const lang = model.language orelse "en";
+                try smart_cache.putTts(voice, lang, "cli-run", text, a.samples, a.sample_rate, a.channels);
+            }
             return writeTtsOutput(io, out, &resp, opts.wav_out);
         },
         .asr, .vad => {
@@ -416,6 +571,21 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                 return 1;
             };
             defer wav.deinit(alloc);
+            if (opts.cache and task_kind == .asr) {
+                const lang = model.language orelse "en";
+                if (try smart_cache.getAsr(lang, wav.samples)) |cached| {
+                    try out.print("{s}\n", .{cached});
+                    try out.print("cache hit (asr)\n", .{});
+                    try out.flush();
+                    return 0;
+                }
+            }
+            var session = eng.createSession(model.name, task_kind, opts.mode) catch |err| {
+                std.debug.print("cannot create session for {s} ({t})\n", .{ model.name, err });
+                return 1;
+            };
+            defer session.deinit(alloc);
+            var resp: runtime.Response = undefined;
             if (opts.mode == .streaming) {
                 try session.streamStart(alloc, null);
                 const frame_len = eng.frameLen();
@@ -427,21 +597,235 @@ fn cmdRun(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: RunOp
                     if (event) |ev| audiocpp.eventFree(ev);
                     offset = end;
                 }
-                var resp = try session.streamFinish();
-                defer resp.deinit();
-                return writeAsrOutput(out, &resp);
+                resp = try session.streamFinish();
+            } else {
+                const req = runtime.Request{
+                    .task = task_kind,
+                    .mode = .offline,
+                    .audio = wav.samples,
+                    .sample_rate = wav.sample_rate,
+                    .channels = wav.channels,
+                    .language = model.language,
+                };
+                resp = try session.run(io, alloc, req);
             }
-            const req = runtime.Request{
-                .task = task_kind,
-                .mode = .offline,
-                .audio = wav.samples,
-                .sample_rate = wav.sample_rate,
-                .channels = wav.channels,
-                .language = model.language,
-            };
-            var resp = try session.run(io, alloc, req);
             defer resp.deinit();
+            if (opts.cache and task_kind == .asr) {
+                const t = try resp.text();
+                try smart_cache.putAsr(model.language orelse "en", wav.samples, t.text);
+            }
             return writeAsrOutput(out, &resp);
+        },
+    }
+}
+
+/// Streaming ASR over a WAV file through the LiveStream Engine:
+/// partial transcripts and VAD activity print as they arrive, then
+/// the final text. With --cache, a repeat of the same audio prints
+/// the cached transcript without inference.
+fn cmdStream(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: StreamOpts) !u8 {
+    const wav_path = opts.wav_in orelse {
+        std.debug.print("stream needs --wav in.wav\n", .{});
+        return 2;
+    };
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    defer eng.deinit();
+
+    eng.loadModelsForTask(.asr) catch |err| {
+        std.debug.print("cannot load model {s} ({t})\n", .{ eng.last_error_model orelse "?", err });
+        return 1;
+    };
+    const model = pickModel(&eng.cfg, opts.model, .asr) orelse {
+        std.debug.print("no asr model in {s}\n", .{opts.config_path});
+        return 1;
+    };
+    var wav = audio.readWavFile(alloc, io, wav_path) catch |err| {
+        std.debug.print("cannot read {s} ({t})\n", .{ wav_path, err });
+        return 1;
+    };
+    defer wav.deinit(alloc);
+
+    var smart_cache = cache.SmartCache.init(alloc, 64 << 20);
+    defer smart_cache.deinit();
+    if (opts.cache) {
+        const lang = model.language orelse "en";
+        if (try smart_cache.getAsr(lang, wav.samples)) |cached| {
+            try out.print("{s}\n", .{cached});
+            try out.print("cache hit (asr)\n", .{});
+            try out.flush();
+            return 0;
+        }
+    }
+
+    var session = eng.createSession(model.name, .asr, .streaming) catch |err| {
+        std.debug.print("cannot create session for {s} ({t})\n", .{ model.name, err });
+        return 1;
+    };
+    defer session.deinit(alloc);
+    try session.streamStart(alloc, null);
+
+    var live = streaming.LiveStream.init(alloc, &session, null, wav.sample_rate);
+    defer live.deinit();
+
+    const frame_len = eng.frameLen();
+    var offset: usize = 0;
+    var partials: usize = 0;
+    while (offset < wav.samples.len) {
+        const end = @min(offset + frame_len * @as(usize, wav.channels), wav.samples.len);
+        const chunk = wav.samples[offset..end];
+        const events = try live.pushMic(chunk, wav.sample_rate, wav.channels);
+        defer {
+            for (events) |*ev| ev.deinit(alloc);
+            alloc.free(events);
+        }
+        for (events) |ev| {
+            for (ev.vad) |act| {
+                try out.print("vad: {s} @{d} ({d:.2})\n", .{ @tagName(act.kind), act.sample, act.probability });
+            }
+            if (ev.text) |t| {
+                partials += 1;
+                try out.print("partial: {s}\n", .{t});
+            }
+        }
+        offset = end;
+    }
+    var resp = try session.streamFinish();
+    defer resp.deinit();
+    const t = try resp.text();
+    try out.print("final: {s}\n", .{t.text});
+    try out.print("vad segments: {d}, partial events: {d}, barge-ins: {d}\n", .{
+        live.tracker.segmentCount(),
+        partials,
+        live.bargeInCount(),
+    });
+    if (opts.cache) {
+        try smart_cache.putAsr(model.language orelse "en", wav.samples, t.text);
+    }
+    try out.flush();
+    return 0;
+}
+
+/// VAD over a WAV file. With a vad model loaded, the model runs and
+/// its segments print; without one, the energy fallback runs and the
+/// output says so — never presented as a model result.
+fn cmdVad(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VadOpts) !u8 {
+    const wav_path = opts.wav_in orelse {
+        std.debug.print("vad needs --wav in.wav\n", .{});
+        return 2;
+    };
+    var eng = loadEngine(alloc, io, opts.config_path) catch |err| {
+        std.debug.print("cannot start engine from {s} ({t})\n", .{ opts.config_path, err });
+        return 1;
+    };
+    defer eng.deinit();
+    var wav = audio.readWavFile(alloc, io, wav_path) catch |err| {
+        std.debug.print("cannot read {s} ({t})\n", .{ wav_path, err });
+        return 1;
+    };
+    defer wav.deinit(alloc);
+
+    const model = pickModel(&eng.cfg, opts.model, .vad);
+    if (model) |m| {
+        if (eng.loadModelsForTask(.vad)) {
+            var session = eng.createSession(m.name, .vad, .offline) catch null;
+            if (session) |*s| {
+                defer s.deinit(alloc);
+                const req = runtime.Request{
+                    .task = .vad,
+                    .mode = .offline,
+                    .audio = wav.samples,
+                    .sample_rate = wav.sample_rate,
+                    .channels = wav.channels,
+                    .language = m.language,
+                };
+                if (s.run(io, alloc, req)) |resp| {
+                    var r = resp;
+                    defer r.deinit();
+                    const segs = try r.result.segments(alloc);
+                    defer alloc.free(segs);
+                    for (segs) |seg| {
+                        try out.print("segment: {d}..{d} conf {d:.2}\n", .{ seg.start_sample, seg.end_sample, seg.confidence });
+                    }
+                    try out.print("vad: model ({s}), {d} segment(s)\n", .{ m.name, segs.len });
+                    try out.flush();
+                    return 0;
+                } else |_| {}
+            }
+        } else |_| {}
+    }
+
+    // No vad model available: energy fallback, labelled as such.
+    var energy = vad.EnergyVad.init(wav.sample_rate);
+    var tracker = vad.VadTracker.init(alloc, wav.sample_rate);
+    defer tracker.deinit();
+    var offset: usize = 0;
+    const chunk_frames = wav.sample_rate / 10; // 100 ms chunks
+    while (offset < wav.samples.len) {
+        const end = @min(offset + chunk_frames * @as(usize, wav.channels), wav.samples.len);
+        // EnergyVad is mono: feed channel 0 when stereo.
+        if (wav.channels == 1) {
+            if (energy.feed(wav.samples[offset..end])) |act| try tracker.feed(act);
+        } else {
+            var mono = try alloc.alloc(f32, (end - offset) / @as(usize, wav.channels));
+            defer alloc.free(mono);
+            for (0..mono.len) |i| mono[i] = wav.samples[offset + i * @as(usize, wav.channels)];
+            if (energy.feed(mono)) |act| try tracker.feed(act);
+        }
+        offset = end;
+    }
+    try tracker.finish(@intCast(wav.samples.len / @as(usize, wav.channels)));
+    for (tracker.segments.items) |seg| {
+        try out.print("segment: {d}..{d} peak {d:.2}\n", .{ seg.start_sample, seg.end_sample, seg.peak_probability });
+    }
+    try out.print("vad: energy fallback (no vad model loaded), {d} segment(s)\n", .{tracker.segmentCount()});
+    try out.flush();
+    return 0;
+}
+
+/// VoiceDNA voice profiles: list, enroll a synthetic voice, delete.
+fn cmdVoices(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: VoicesOpts) !u8 {
+    const store = voicedna.VoiceStore.init(alloc, io, "voices");
+    switch (opts) {
+        .list => {
+            const profiles = try store.list();
+            defer {
+                for (profiles) |*p| p.deinit(alloc);
+                alloc.free(profiles);
+            }
+            if (profiles.len == 0) {
+                try out.print("no voice profiles in voices/\n", .{});
+            }
+            for (profiles) |p| {
+                try out.print("  {s} \"{s}\" [{s}] source={s} consent={}\n", .{
+                    p.id, p.name, p.language, p.source.name(), p.consent,
+                });
+            }
+            try out.flush();
+            return 0;
+        },
+        .enroll_synthetic => |e| {
+            var profile = store.enrollSynthetic(e.id, e.name, e.language) catch |err| {
+                std.debug.print("cannot enroll voice {s} ({t})\n", .{ e.id, err });
+                return 1;
+            };
+            defer profile.deinit(alloc);
+            try out.print("enrolled synthetic voice {s} \"{s}\" [{s}] -> {s}\n", .{
+                profile.id, profile.name, profile.language, profile.reference_wav,
+            });
+            try out.flush();
+            return 0;
+        },
+        .delete => |d| {
+            store.delete(d.id) catch |err| {
+                std.debug.print("cannot delete voice {s} ({t})\n", .{ d.id, err });
+                return 1;
+            };
+            try out.print("deleted voice {s}\n", .{d.id});
+            try out.flush();
+            return 0;
         },
     }
 }
@@ -473,7 +857,7 @@ fn cmdBench(alloc: std.mem.Allocator, io: std.Io, out: *std.Io.Writer, opts: Ben
         return 0;
     };
     defer eng.deinit();
-    eng.loadConfigModels() catch |err| {
+    eng.loadModelsForTask(opts.task) catch |err| {
         std.debug.print("inference skipped: cannot load model {s} ({t})\n", .{ eng.last_error_model orelse "?", err });
         try out.flush();
         return 0;
@@ -533,6 +917,23 @@ test "parseArgs accepts the main commands" {
     try std.testing.expect(r.run.task == .tts);
     try std.testing.expect(r.run.mode == .streaming);
     try std.testing.expectEqualStrings("hello", r.run.text.?);
+    const rc = try parseArgs(&.{ "run", "--task", "tts", "--text", "hi", "--cache", "--voice", "v1" });
+    try std.testing.expect(rc.run.cache);
+    try std.testing.expectEqualStrings("v1", rc.run.voice.?);
+    const s = try parseArgs(&.{ "stream", "--wav", "in.wav", "--cache" });
+    try std.testing.expectEqualStrings("in.wav", s.stream.wav_in.?);
+    try std.testing.expect(s.stream.cache);
+    const vc = try parseArgs(&.{ "vad", "--wav", "in.wav" });
+    try std.testing.expectEqualStrings("in.wav", vc.vad.wav_in.?);
+    const vl = try parseArgs(&.{ "voices", "list" });
+    try std.testing.expect(vl.voices == .list);
+    const ve = try parseArgs(&.{ "voices", "enroll-synthetic", "id1", "My Voice", "--language", "kq" });
+    try std.testing.expectEqualStrings("id1", ve.voices.enroll_synthetic.id);
+    try std.testing.expectEqualStrings("kq", ve.voices.enroll_synthetic.language);
+    const vd = try parseArgs(&.{ "voices", "delete", "id1" });
+    try std.testing.expectEqualStrings("id1", vd.voices.delete.id);
+    const pm = try parseArgs(&.{ "plugins", "load", "--manifest", "examples/plugins/noop/manifest.toml" });
+    try std.testing.expectEqualStrings("examples/plugins/noop/manifest.toml", pm.plugins_load_manifest.path);
     const b = try parseArgs(&.{ "bench", "--iterations", "50" });
     try std.testing.expectEqual(@as(u64, 50), b.bench.iterations);
 }
@@ -543,6 +944,10 @@ test "parseArgs rejects bad input" {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "run", "--task", "telepathy" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "bench", "--iterations", "0" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "config", "validate" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "stream" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{"vad"}));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "voices", "enroll-synthetic", "only-id" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "voices", "delete" }));
 }
 
 test "listPluginFiles lists .so files in a real directory" {

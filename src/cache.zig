@@ -23,11 +23,21 @@ pub const CacheStats = struct {
 
 const EntryKind = enum { tts_audio, asr_text };
 
+/// Cached TTS audio, with the rate/channels it was generated at so a
+/// cache hit writes an exact WAV.
+pub const TtsAudio = struct {
+    samples: []const f32,
+    sample_rate: u32,
+    channels: u8,
+};
+
 const Entry = struct {
     key: []const u8, // owned composite key
     kind: EntryKind,
     audio: ?[]f32 = null, // owned, tts_audio only
     text: ?[]const u8 = null, // owned, asr_text only
+    sample_rate: u32 = 0, // tts_audio only
+    channels: u8 = 0, // tts_audio only
     bytes: u64 = 0,
     last_used: u64 = 0,
 };
@@ -82,7 +92,7 @@ pub const SmartCache = struct {
         }
     }
 
-    fn store(self: *SmartCache, key: []const u8, kind: EntryKind, audio: ?[]const f32, text: ?[]const u8) !void {
+    fn store(self: *SmartCache, key: []const u8, kind: EntryKind, audio: ?[]const f32, text: ?[]const u8, sample_rate: u32, channels: u8) !void {
         // Replace in place when the key already exists.
         if (self.find(key, kind)) |e| {
             if (e.audio) |a| self.alloc.free(a);
@@ -90,6 +100,8 @@ pub const SmartCache = struct {
             self.stats.bytes -= e.bytes;
             e.audio = if (audio) |a| try self.alloc.dupe(f32, a) else null;
             e.text = if (text) |t| try self.alloc.dupe(u8, t) else null;
+            e.sample_rate = sample_rate;
+            e.channels = channels;
             e.bytes = entryBytes(e.audio, e.text);
             e.last_used = self.tick;
             self.stats.bytes += e.bytes;
@@ -109,6 +121,8 @@ pub const SmartCache = struct {
             .kind = kind,
             .audio = audio_copy,
             .text = text_copy,
+            .sample_rate = sample_rate,
+            .channels = channels,
             .bytes = bytes,
             .last_used = self.tick,
         });
@@ -116,26 +130,26 @@ pub const SmartCache = struct {
         self.stats.entries = self.entries.items.len;
     }
 
-    /// Look up cached TTS audio. Returns a borrowed slice, or null.
-    pub fn getTts(self: *SmartCache, voice: []const u8, language: []const u8, context: []const u8, text: []const u8) !?[]const f32 {
+    /// Look up cached TTS audio. Returns borrowed audio, or null.
+    pub fn getTts(self: *SmartCache, voice: []const u8, language: []const u8, context: []const u8, text: []const u8) !?TtsAudio {
         const key = try ttsKey(self.alloc, voice, language, context, text);
         defer self.alloc.free(key);
         self.tick += 1;
         if (self.find(key, .tts_audio)) |e| {
             e.last_used = self.tick;
             self.stats.hits += 1;
-            return e.audio;
+            return .{ .samples = e.audio.?, .sample_rate = e.sample_rate, .channels = e.channels };
         }
         self.stats.misses += 1;
         return null;
     }
 
     /// Store TTS audio under the voice/language/context/text key.
-    pub fn putTts(self: *SmartCache, voice: []const u8, language: []const u8, context: []const u8, text: []const u8, audio: []const f32) !void {
+    pub fn putTts(self: *SmartCache, voice: []const u8, language: []const u8, context: []const u8, text: []const u8, audio: []const f32, sample_rate: u32, channels: u8) !void {
         const key = try ttsKey(self.alloc, voice, language, context, text);
         defer self.alloc.free(key);
         self.tick += 1;
-        try self.store(key, .tts_audio, audio, null);
+        try self.store(key, .tts_audio, audio, null, sample_rate, channels);
     }
 
     /// Look up cached ASR text for audio. Returns a borrowed slice, or null.
@@ -157,7 +171,7 @@ pub const SmartCache = struct {
         const key = try asrKey(self.alloc, language, samples);
         defer self.alloc.free(key);
         self.tick += 1;
-        try self.store(key, .asr_text, null, text);
+        try self.store(key, .asr_text, null, text, 0, 0);
     }
 };
 
@@ -185,9 +199,11 @@ test "tts cache: hit on same key, miss on different voice/language/context" {
     var cache = SmartCache.init(alloc, 1 << 20);
     defer cache.deinit();
     const audio_samples = [_]f32{ 0.1, 0.2, 0.3 };
-    try cache.putTts("voice-a", "en", "chat", "hello", &audio_samples);
+    try cache.putTts("voice-a", "en", "chat", "hello", &audio_samples, 24000, 1);
     const hit = (try cache.getTts("voice-a", "en", "chat", "hello")).?;
-    try std.testing.expectEqual(@as(usize, 3), hit.len);
+    try std.testing.expectEqual(@as(usize, 3), hit.samples.len);
+    try std.testing.expectEqual(@as(u32, 24000), hit.sample_rate);
+    try std.testing.expectEqual(@as(u8, 1), hit.channels);
     try std.testing.expect((try cache.getTts("voice-b", "en", "chat", "hello")) == null);
     try std.testing.expect((try cache.getTts("voice-a", "kq", "chat", "hello")) == null);
     try std.testing.expect((try cache.getTts("voice-a", "en", "alerts", "hello")) == null);
@@ -217,10 +233,10 @@ test "lru eviction drops the least recently used entry" {
     const one = [_]f32{ 1, 1, 1 };
     const two = [_]f32{ 2, 2, 2 };
     const three = [_]f32{ 3, 3, 3 };
-    try cache.putTts("v", "en", "c", "one", &one);
-    try cache.putTts("v", "en", "c", "two", &two);
+    try cache.putTts("v", "en", "c", "one", &one, 24000, 1);
+    try cache.putTts("v", "en", "c", "two", &two, 24000, 1);
     _ = try cache.getTts("v", "en", "c", "one"); // "one" is now most recent
-    try cache.putTts("v", "en", "c", "three", &three);
+    try cache.putTts("v", "en", "c", "three", &three, 24000, 1);
     try std.testing.expect((try cache.getTts("v", "en", "c", "one")) != null);
     try std.testing.expect((try cache.getTts("v", "en", "c", "two")) == null); // evicted
     try std.testing.expect((try cache.getTts("v", "en", "c", "three")) != null);

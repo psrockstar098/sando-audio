@@ -131,7 +131,7 @@ test "speculative planner prepares cache hits and cancels on barge-in" {
     var tts_cache = cache.SmartCache.init(alloc, 1 << 20);
     defer tts_cache.deinit();
     const samples = [_]f32{ 0.1, 0.2 };
-    try tts_cache.putTts("v", "en", "chat", "yes, go ahead", &samples);
+    try tts_cache.putTts("v", "en", "chat", "yes, go ahead", &samples, 24000, 1);
     var planner = SpeculativePlanner{};
     planner.setCandidates(&.{ "yes, go ahead", "let me think", "no, stop" });
     const hits = try planner.prepare(&tts_cache, "v", "en", "chat");
