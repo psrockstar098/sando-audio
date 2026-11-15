@@ -9,7 +9,7 @@ Phase 1 (Core Engine & Universal Runtime): **COMPLETE and verified**,
 | Check | Result |
 |---|---|
 | `zig build -j1 -Dcpu=baseline` | clean |
-| `zig build test -j1 -Dcpu=baseline` | **40/40 tests pass, no leaks** |
+| `zig build test -j1 -Dcpu=baseline` | **42/42 tests pass, no leaks** |
 | CLI smoke (`version`, `doctor`, `config validate`, `models list`, `bench`, `plugins list`, `plugins load`, bad-input paths) | all behave as documented |
 | audio.cpp live link | `libaudiocpp.so.0` + `libggml.so.0` linked; registry create loads the CPU backend (`libggml-cpu-cooperlake.so`); ABI `0x200`, build `0.9.3`, **17 tasks, 133 families** |
 | `zig build` without the prebuilt | builds and runs with the null backend — verified live in a temp copy (no `third-party/`): `doctor` reports `audio.cpp: NOT linked (null inference backend)`; inference calls return `error.AudioCppNotLinked` |
@@ -30,7 +30,7 @@ Phase 1 (Core Engine & Universal Runtime): **COMPLETE and verified**,
 | 10 | Audio I/O | ⚠️ Partial | `src/audio.zig` — WAV read/write (PCM16 + float32) and null device (silence) work and are tested. **Live mic/speaker capture is NOT in Phase 1** — no audio device backend is vendored; `doctor` says so |
 | 11 | C API | ✅ Done (lifecycle + introspection) | `src/c_api.zig` — create/destroy, version, backend, linked, task list, load model, config validate, last-error; tested via the real engine. **Inference entry points land in Phase 2** |
 | 12 | CLI (doctor, bench, config, run) | ✅ Done | `src/cli.zig` — version/doctor/config validate/run/bench/models list/plugins list+load; offline + streaming run paths; usage errors exit 2 |
-| 13 | Test suite + docs | ✅ Done | 40/40 tests, no leaks; README, STATUS (this file), `docs/API.md`; example config + plugin manifest |
+| 13 | Test suite + docs | ✅ Done | 42/42 tests, no leaks; README, STATUS (this file), `docs/API.md`; example config + plugin manifest |
 
 ## audio.cpp prebuilt notes
 
