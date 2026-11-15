@@ -23,6 +23,8 @@ pub const audiosense = @import("audiosense.zig");
 pub const voicedna = @import("voicedna.zig");
 pub const cache = @import("cache.zig");
 pub const reflex = @import("reflex.zig");
+pub const brain = @import("brain.zig");
+pub const conversation = @import("conversation.zig");
 
 pub const version = "0.2.0";
 pub const version_string = "sando-audio 0.2.0 (Phase 2: Real-Time Speech & Voice Intelligence)";
@@ -49,4 +51,6 @@ test {
     _ = @import("voicedna.zig");
     _ = @import("cache.zig");
     _ = @import("reflex.zig");
+    _ = @import("brain.zig");
+    _ = @import("conversation.zig");
 }
