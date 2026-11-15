@@ -141,6 +141,31 @@ pub const Engine = struct {
         }
     }
 
+    /// Load only the config models of one kind. A missing model of
+    /// another kind never blocks the run: `run --task asr` works when
+    /// the TTS model file is absent. Failures in the requested kind
+    /// still fail and record `last_error_model`.
+    pub fn loadModelsOfKind(self: *Engine, kind: config.ModelKind) !void {
+        for (self.cfg.models) |m| {
+            if (m.kind != kind) continue;
+            self.loadModel(m.name, m.kind, m.file) catch |err| {
+                self.last_error_model = m.name;
+                return err;
+            };
+        }
+    }
+
+    /// Load only the models a task needs (asr → stt, tts → tts,
+    /// vad → vad). See loadModelsOfKind.
+    pub fn loadModelsForTask(self: *Engine, task: runtime.TaskKind) !void {
+        const kind: config.ModelKind = switch (task) {
+            .asr => .stt,
+            .tts => .tts,
+            .vad => .vad,
+        };
+        return self.loadModelsOfKind(kind);
+    }
+
     /// Register one model and load its weights. `config_id`/`weight_id`
     /// are optional audio.cpp model-spec identifiers.
     pub fn loadModel(
@@ -318,4 +343,56 @@ test "reload accepts flag-only changes, refuses shape changes" {
     );
     try std.testing.expect(!engine.canReload(&changed));
     try std.testing.expectError(error.ConfigReloadRequiresRestart, engine.reloadConfig(changed));
+}
+
+test "lazy loading: asr run succeeds when the tts model file is missing" {
+    const alloc = std.testing.allocator;
+    const cfg = try config.parse(alloc,
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[[models]]
+        \\name = "qwen3-tts-0.6b"
+        \\kind = "tts"
+        \\file = "models/does-not-exist-tts.gguf"
+        \\[[models]]
+        \\name = "moonshine-small"
+        \\kind = "stt"
+        \\file = "models/does-not-exist-stt.gguf"
+        \\
+    );
+    var engine = try Engine.init(alloc, std.testing.io, cfg);
+    defer engine.deinit();
+    // No stt model file exists, so loading the asr kind fails — but on
+    // the STT model, never on the (also missing) TTS model. The point:
+    // the TTS entry is never attempted.
+    if (audiocpp.has_link) {
+        try std.testing.expectError(error.LoadFailed, engine.loadModelsForTask(.asr));
+    } else {
+        try std.testing.expectError(error.AudioCppNotLinked, engine.loadModelsForTask(.asr));
+    }
+    try std.testing.expectEqualStrings("moonshine-small", engine.last_error_model.?);
+
+    // And with a config that has ONLY a tts model, an asr run loads
+    // nothing and succeeds — the missing TTS file never blocks it.
+    const cfg2 = try config.parse(alloc,
+        \\[runtime]
+        \\mode = "realtime"
+        \\sample_rate = 24000
+        \\channels = 1
+        \\[hardware]
+        \\backend = "auto"
+        \\[[models]]
+        \\name = "qwen3-tts-0.6b"
+        \\kind = "tts"
+        \\file = "models/does-not-exist-tts.gguf"
+        \\
+    );
+    var engine2 = try Engine.init(alloc, std.testing.io, cfg2);
+    defer engine2.deinit();
+    try engine2.loadModelsForTask(.asr);
+    try std.testing.expect(engine2.last_error_model == null);
 }
