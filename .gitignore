@@ -7,3 +7,6 @@ config/sando.toml
 *.o
 *.a
 *.so
+
+__pycache__/
+*.pyc
