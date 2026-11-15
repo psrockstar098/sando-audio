@@ -516,6 +516,10 @@ pub const Conversation = struct {
                 const follow_prompt = try self.session.renderPrompt(self.alloc);
                 defer self.alloc.free(follow_prompt);
                 self.resetForFollowUp();
+                // Mark the follow-up in the live echo: without this the
+                // follow-up's chunks stream onto the same line as the
+                // cut-off reply ("Hello!Why did...").
+                if (self.echo) |w| w.print("\n[Sando, after interruption] ", .{}) catch {};
                 const follow = try self.runBrain(follow_prompt);
                 try self.session.appendTurn(.assistant, follow);
                 self.alloc.free(result.reply);
